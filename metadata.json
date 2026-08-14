@@ -1,0 +1,6 @@
+{
+  "name": "Obsidian Vault Checker",
+  "description": "Inspect, audit, auto-fix, and repair your Obsidian vault with link validation, orphaned note MOC generation, tag taxonomy standardization, YAML metadata repair, interactive graph network, and 1-click ZIP export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
