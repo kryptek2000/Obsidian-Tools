@@ -1,6 +1,6 @@
 import JSZip from 'jszip';
 import { RawFileEntry } from './vaultParser';
-import { VaultFile, BrokenLinkItem, TagAuditItem, FrontmatterIssueItem } from '../types';
+import { VaultFile, BrokenLinkItem, TagAuditItem, FrontmatterIssueItem, DuplicateGroup } from '../types';
 
 export interface AutoFixReport {
   brokenLinksFixed: number;
@@ -35,6 +35,13 @@ export const DEFAULT_AUTO_FIX_OPTIONS: AutoFixOptions = {
 };
 
 /**
+ * Safely escapes special regular expression characters in a string
+ */
+export function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
  * Detects whether the file uses CRLF or LF line endings to preserve source formatting
  */
 export function detectLineEnding(content: string): '\r\n' | '\n' {
@@ -46,22 +53,31 @@ export function detectLineEnding(content: string): '\r\n' | '\n' {
  * preserving alias, heading, embed status, and surrounding formatting.
  */
 export function replaceLinkInContent(content: string, oldTarget: string, newTarget: string): string {
-  const escapedOld = oldTarget.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (!content || typeof content !== 'string') return content || '';
+  if (!oldTarget || typeof oldTarget !== 'string' || !newTarget || typeof newTarget !== 'string') return content;
+  if (oldTarget.trim() === newTarget.trim()) return content;
 
-  // 1. Wikilinks: [[oldTarget]] or [[oldTarget|Alias]] or [[oldTarget#Heading]] or ![[oldTarget]]
-  const wikiPattern = new RegExp(`(!?\\[\\[)${escapedOld}(#[^\\]|]+)?(\\|[^\\]]+)?(\\]\\])`, 'g');
-  let updated = content.replace(wikiPattern, (_match, prefix, heading, alias, closing) => {
-    return `${prefix}${newTarget}${heading || ''}${alias || ''}${closing}`;
-  });
+  try {
+    const escapedOld = escapeRegex(oldTarget.trim());
 
-  // 2. Markdown links: [alias](oldTarget.md) or [alias](oldTarget) or ![alt](oldTarget.png)
-  const mdPattern = new RegExp(`(!?\\[[^\\]]*\\]\\()${escapedOld}(\\.md)?(#[^)]+)?(\\))`, 'g');
-  updated = updated.replace(mdPattern, (_match, prefix, mdExt, heading, closing) => {
-    const ext = mdExt ? '.md' : '';
-    return `${prefix}${newTarget}${ext}${heading || ''}${closing}`;
-  });
+    // 1. Wikilinks: [[oldTarget]] or [[oldTarget|Alias]] or [[oldTarget#Heading]] or ![[oldTarget]]
+    const wikiPattern = new RegExp(`(!?\\[\\[)${escapedOld}(#[^\\]|]+)?(\\|[^\\]]+)?(\\]\\])`, 'g');
+    let updated = content.replace(wikiPattern, (_match, prefix, heading, alias, closing) => {
+      return `${prefix}${newTarget}${heading || ''}${alias || ''}${closing}`;
+    });
 
-  return updated;
+    // 2. Markdown links: [alias](oldTarget.md) or [alias](oldTarget) or ![alt](oldTarget.png)
+    const mdPattern = new RegExp(`(!?\\[[^\\]]*\\]\\()${escapedOld}(\\.md)?(#[^)]+)?(\\))`, 'g');
+    updated = updated.replace(mdPattern, (_match, prefix, mdExt, heading, closing) => {
+      const ext = mdExt ? '.md' : '';
+      return `${prefix}${newTarget}${ext}${heading || ''}${closing}`;
+    });
+
+    return updated;
+  } catch (err) {
+    console.error('Error replacing link in content:', err);
+    return content;
+  }
 }
 
 /**
@@ -93,27 +109,30 @@ export function standardizeTagsInContent(
         // Check inline bracket array: tags: [React, PKM] or tags: React
         let replacedLine = line;
         casingMap.forEach((canonical, lower) => {
-          const tagRegex = new RegExp(`(?<=[\\[\\s,"]|^|#)${lower}(?=[\\],\\s"]|$)`, 'gi');
-          replacedLine = replacedLine.replace(tagRegex, (matched) => {
+          const escaped = escapeRegex(lower);
+          const tagRegex = new RegExp(`(^|[\\[\\s,"]|#)(${escaped})([\\],\\s"']|$)`, 'gi');
+          replacedLine = replacedLine.replace(tagRegex, (_m, p1, matched, p3) => {
             if (matched !== canonical) {
               fmModified = true;
-              return canonical;
+              return `${p1}${canonical}${p3}`;
             }
-            return matched;
+            return _m;
           });
         });
         return replacedLine;
       }
 
-      // If inside a YAML tag list (e.g. "  - React")
+      // If inside a YAML tag list (e.g. "  - React" or "  - #React" or "  - \"React\"")
       if (inTagsList) {
         if (/^\s*-\s+/.test(line)) {
           let replacedLine = line;
           casingMap.forEach((canonical, lower) => {
-            const listTagRegex = new RegExp(`(?<=^\\s*-\\s*(?:#|"))?${lower}(?="?\\s*$)`, 'gi');
-            if (new RegExp(`^\\s*-\\s*(?:#|")?${lower}["\\s]*$`, 'i').test(line)) {
-              replacedLine = line.replace(new RegExp(`${lower}`, 'i'), canonical);
-              if (replacedLine !== line) {
+            const escaped = escapeRegex(lower);
+            const listTagPattern = new RegExp(`(^\\s*-\\s*["'#]?)${escaped}(["']?\\s*$)`, 'i');
+            if (listTagPattern.test(replacedLine)) {
+              const prev = replacedLine;
+              replacedLine = replacedLine.replace(listTagPattern, `$1${canonical}$2`);
+              if (replacedLine !== prev) {
                 fmModified = true;
               }
             }
@@ -158,7 +177,8 @@ export function standardizeTagsInContent(
   // Replace inline tags outside code
   let bodyChanged = false;
   casingMap.forEach((canonical, lower) => {
-    const inlineTagRegex = new RegExp(`(^|[\\s(\\[{])#(${lower})(?=[\\s,.;:!?)\\]}]|$)`, 'gi');
+    const escaped = escapeRegex(lower);
+    const inlineTagRegex = new RegExp(`(^|[\\s(\\[{])#(${escaped})(?=[\\s,.;:!?)\\]}]|$)`, 'gi');
     const beforeReplace = bodyWithPlaceholders;
     bodyWithPlaceholders = bodyWithPlaceholders.replace(inlineTagRegex, (match, prefix, capturedTag) => {
       if (capturedTag !== canonical) {
@@ -539,3 +559,531 @@ export async function exportVaultAsZip(
   a.click();
   URL.revokeObjectURL(url);
 }
+
+/**
+ * Deletes a duplicate file from rawFiles and optionally redirects backlinks pointing to it
+ */
+export function deleteDuplicateNote(
+  rawFiles: RawFileEntry[],
+  filePathToDelete: string,
+  targetPathForBacklinks?: string
+): RawFileEntry[] {
+  if (!rawFiles || rawFiles.length === 0 || !filePathToDelete) return rawFiles || [];
+
+  const fileToDelete = rawFiles.find((f) => f && f.path === filePathToDelete);
+  if (!fileToDelete) return rawFiles;
+
+  const targetFile = targetPathForBacklinks ? rawFiles.find((f) => f && f.path === targetPathForBacklinks) : null;
+  const oldBaseName = fileToDelete.name ? fileToDelete.name.replace(/\.md$/i, '') : '';
+  const newBaseName = targetFile && targetFile.name ? targetFile.name.replace(/\.md$/i, '') : null;
+
+  return rawFiles
+    .filter((f) => f && f.path !== filePathToDelete)
+    .map((file) => {
+      if (!file || file.isBinary || file.isConfigOrPlugin || !newBaseName || !targetFile || !oldBaseName) {
+        return file;
+      }
+      // Replace references to old base name if redirecting
+      const updatedContent = replaceLinkInContent(file.content, oldBaseName, newBaseName);
+      if (updatedContent !== file.content) {
+        return {
+          ...file,
+          content: updatedContent,
+          size: updatedContent.length,
+          lastModified: Date.now(),
+        };
+      }
+      return file;
+    });
+}
+
+/**
+ * Merges a duplicate note into a primary note with options to combine tags, append body content, and redirect backlinks
+ */
+export function mergeDuplicateNotes(
+  rawFiles: RawFileEntry[],
+  primaryPath: string,
+  duplicatePath: string,
+  options: {
+    mergeTags: boolean;
+    appendContent: boolean;
+    redirectLinks: boolean;
+  }
+): RawFileEntry[] {
+  if (!rawFiles || rawFiles.length === 0 || !primaryPath || !duplicatePath || primaryPath === duplicatePath) {
+    return rawFiles || [];
+  }
+
+  const primaryEntry = rawFiles.find((f) => f && f.path === primaryPath);
+  const duplicateEntry = rawFiles.find((f) => f && f.path === duplicatePath);
+
+  if (!primaryEntry || !duplicateEntry) return rawFiles;
+
+  let updatedPrimaryContent = primaryEntry.content || '';
+  const primaryLineEnding = detectLineEnding(updatedPrimaryContent);
+
+  // 1. Merge tags
+  if (options.mergeTags && duplicateEntry.content) {
+    const dupTagsMatch = duplicateEntry.content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    const dupInlineTags = Array.from(duplicateEntry.content.matchAll(/(?:^|[\s(\[{])#([a-zA-Z0-9_\-\/]+)/g)).map((m) => m[1]);
+    const extractedTags = new Set<string>(dupInlineTags);
+
+    if (dupTagsMatch) {
+      const fmText = dupTagsMatch[1];
+      const fmTagsMatch = fmText.match(/tags:\s*\[(.*?)\]/);
+      if (fmTagsMatch) {
+        fmTagsMatch[1].split(',').forEach((t) => {
+          const clean = t.trim().replace(/^['"#]+|['"]+$/g, '');
+          if (clean) extractedTags.add(clean);
+        });
+      }
+      const listMatches = fmText.matchAll(/^\s*-\s+["'#]?([a-zA-Z0-9_\-\/]+)["']?/gm);
+      for (const lm of listMatches) {
+        extractedTags.add(lm[1]);
+      }
+    }
+
+    if (extractedTags.size > 0) {
+      const primaryFmMatch = updatedPrimaryContent.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+      if (primaryFmMatch) {
+        const lines = updatedPrimaryContent.split(primaryLineEnding);
+        const fmEndIndex = lines.slice(1).findIndex((l) => l.trim() === '---') + 1;
+        let hasTagsKey = false;
+        for (let i = 1; i < fmEndIndex; i++) {
+          if (/^tags:\s*/i.test(lines[i])) {
+            hasTagsKey = true;
+            const existingTags = lines[i].replace(/^tags:\s*/i, '');
+            if (existingTags.startsWith('[')) {
+              const currentTagList = existingTags
+                .replace(/[\[\]]/g, '')
+                .split(',')
+                .map((t) => t.trim().replace(/^['"#]+|['"]+$/g, ''));
+              extractedTags.forEach((t) => {
+                if (!currentTagList.includes(t)) currentTagList.push(t);
+              });
+              lines[i] = `tags: [${currentTagList.filter(Boolean).join(', ')}]`;
+            } else {
+              const newTagsToInsert = Array.from(extractedTags).map((t) => `  - ${t}`);
+              lines.splice(i + 1, 0, ...newTagsToInsert);
+            }
+            break;
+          }
+        }
+        if (!hasTagsKey) {
+          lines.splice(1, 0, `tags: [${Array.from(extractedTags).join(', ')}]`);
+        }
+        updatedPrimaryContent = lines.join(primaryLineEnding);
+      }
+    }
+  }
+
+  // 2. Append content if selected and bodies are not identical
+  if (options.appendContent && duplicateEntry.content) {
+    const primaryBody = (primaryEntry.content || '').replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trim();
+    const dupBody = duplicateEntry.content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trim();
+
+    if (primaryBody !== dupBody && dupBody.length > 0) {
+      const dupBaseName = (duplicateEntry.name || 'Duplicate Note').replace(/\.md$/i, '');
+      const appendBlock = `${primaryLineEnding}${primaryLineEnding}---${primaryLineEnding}## 📑 Merged Content from \`${dupBaseName}\`${primaryLineEnding}${primaryLineEnding}${dupBody}${primaryLineEnding}`;
+      updatedPrimaryContent += appendBlock;
+    }
+  }
+
+  const oldBaseName = (duplicateEntry.name || '').replace(/\.md$/i, '');
+  const newBaseName = (primaryEntry.name || '').replace(/\.md$/i, '');
+
+  return rawFiles
+    .filter((f) => f && f.path !== duplicatePath)
+    .map((file) => {
+      if (!file) return file;
+      if (file.path === primaryPath) {
+        return {
+          ...file,
+          content: updatedPrimaryContent,
+          size: updatedPrimaryContent.length,
+          lastModified: Date.now(),
+        };
+      }
+      if (options.redirectLinks && !file.isBinary && !file.isConfigOrPlugin && oldBaseName && newBaseName && oldBaseName !== newBaseName) {
+        const updated = replaceLinkInContent(file.content, oldBaseName, newBaseName);
+        if (updated !== file.content) {
+          return {
+            ...file,
+            content: updated,
+            size: updated.length,
+            lastModified: Date.now(),
+          };
+        }
+      }
+      return file;
+    });
+}
+
+export interface BatchProgressCallback {
+  (progress: {
+    phase: 'analyzing' | 'deleting' | 'updating-links' | 'completed';
+    current: number;
+    total: number;
+    message: string;
+    percentage: number;
+  }): void;
+}
+
+/**
+ * Automatically cleans all exact duplicate notes in smaller batched increments
+ * yielding to the browser event loop to prevent UI thread freezing.
+ */
+export async function batchResolveExactDuplicatesAsync(
+  rawFiles: RawFileEntry[],
+  duplicateGroups: DuplicateGroup[],
+  onProgress?: BatchProgressCallback,
+  batchChunkSize: number = 6
+): Promise<{ updatedRawFiles: RawFileEntry[]; resolvedCount: number }> {
+  if (!rawFiles || rawFiles.length === 0 || !duplicateGroups || duplicateGroups.length === 0) {
+    onProgress?.({
+      phase: 'completed',
+      current: 0,
+      total: 0,
+      message: 'No duplicate groups to process.',
+      percentage: 100,
+    });
+    return { updatedRawFiles: rawFiles || [], resolvedCount: 0 };
+  }
+
+  const exactGroups = duplicateGroups.filter((g) => g && g.type === 'exact-content');
+  if (exactGroups.length === 0) {
+    onProgress?.({
+      phase: 'completed',
+      current: 0,
+      total: 0,
+      message: 'No exact content duplicate groups found.',
+      percentage: 100,
+    });
+    return { updatedRawFiles: rawFiles, resolvedCount: 0 };
+  }
+
+  onProgress?.({
+    phase: 'analyzing',
+    current: 0,
+    total: exactGroups.length,
+    message: `Analyzing ${exactGroups.length} exact duplicate groups...`,
+    percentage: 10,
+  });
+
+  // Yield to allow UI update
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const pathsToDelete = new Set<string>();
+  const pathsToKeep = new Set<string>();
+  const linkRedirectMap = new Map<string, string>(); // oldBaseName -> newBaseName
+
+  // Step 1: Analyze groups in chunks
+  for (let i = 0; i < exactGroups.length; i += batchChunkSize) {
+    const chunk = exactGroups.slice(i, i + batchChunkSize);
+
+    chunk.forEach((group) => {
+      if (!group || !group.files || group.files.length < 2) return;
+
+      const validGroupFiles = group.files.filter(
+        (f) => f && f.path && rawFiles.some((rf) => rf && rf.path === f.path)
+      );
+      if (validGroupFiles.length < 2) return;
+
+      // Sort to find best primary note (highest backlinks, shallowest directory depth)
+      const sorted = [...validGroupFiles].sort((a, b) => {
+        const aDepth = (a.path || '').split('/').length;
+        const bDepth = (b.path || '').split('/').length;
+        const aBacklinks = a.backlinks ? a.backlinks.length : 0;
+        const bBacklinks = b.backlinks ? b.backlinks.length : 0;
+        if (bBacklinks !== aBacklinks) {
+          return bBacklinks - aBacklinks;
+        }
+        return aDepth - bDepth;
+      });
+
+      const primaryFile = sorted.find((f) => f && f.path && !pathsToDelete.has(f.path)) || sorted[0];
+      if (!primaryFile || !primaryFile.path) return;
+
+      pathsToKeep.add(primaryFile.path);
+
+      const duplicates = sorted.filter((f) => f && f.path && f.path !== primaryFile.path && !pathsToKeep.has(f.path));
+      duplicates.forEach((d) => {
+        if (!d || !d.path) return;
+        pathsToDelete.add(d.path);
+        if (d.baseName && primaryFile.baseName && d.baseName !== primaryFile.baseName) {
+          linkRedirectMap.set(d.baseName, primaryFile.baseName);
+        }
+      });
+    });
+
+    const progressPct = Math.min(40, 10 + Math.round(((i + chunk.length) / exactGroups.length) * 30));
+    onProgress?.({
+      phase: 'analyzing',
+      current: Math.min(exactGroups.length, i + chunk.length),
+      total: exactGroups.length,
+      message: `Identified ${pathsToDelete.size} redundant clone notes to clean...`,
+      percentage: progressPct,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  if (pathsToDelete.size === 0) {
+    onProgress?.({
+      phase: 'completed',
+      current: 0,
+      total: 0,
+      message: 'All files are already unique.',
+      percentage: 100,
+    });
+    return { updatedRawFiles: rawFiles, resolvedCount: 0 };
+  }
+
+  // Step 2: Batched deletion filtering
+  onProgress?.({
+    phase: 'deleting',
+    current: pathsToDelete.size,
+    total: pathsToDelete.size,
+    message: `Removing ${pathsToDelete.size} redundant duplicate files...`,
+    percentage: 50,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  let updatedRawFiles = rawFiles.filter((f) => f && !pathsToDelete.has(f.path));
+
+  // Step 3: Link redirection across vault in chunks if needed
+  if (linkRedirectMap.size > 0) {
+    const totalFiles = updatedRawFiles.length;
+    const fileBatchSize = 30;
+    const resultingFiles: RawFileEntry[] = [];
+
+    for (let i = 0; i < totalFiles; i += fileBatchSize) {
+      const fileSlice = updatedRawFiles.slice(i, i + fileBatchSize);
+
+      for (const file of fileSlice) {
+        if (!file || file.isBinary || file.isConfigOrPlugin || !file.content) {
+          resultingFiles.push(file);
+          continue;
+        }
+
+        let newContent = file.content;
+        linkRedirectMap.forEach((newTarget, oldTarget) => {
+          if (oldTarget && newTarget && oldTarget !== newTarget) {
+            newContent = replaceLinkInContent(newContent, oldTarget, newTarget);
+          }
+        });
+
+        if (newContent !== file.content) {
+          resultingFiles.push({
+            ...file,
+            content: newContent,
+            size: newContent.length,
+            lastModified: Date.now(),
+          });
+        } else {
+          resultingFiles.push(file);
+        }
+      }
+
+      const processedCount = Math.min(totalFiles, i + fileBatchSize);
+      const linkPct = 50 + Math.round((processedCount / totalFiles) * 45);
+
+      onProgress?.({
+        phase: 'updating-links',
+        current: processedCount,
+        total: totalFiles,
+        message: `Rewriting incoming wikilinks (${processedCount}/${totalFiles} files checked)...`,
+        percentage: linkPct,
+      });
+
+      // Yield thread
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+
+    updatedRawFiles = resultingFiles;
+  }
+
+  onProgress?.({
+    phase: 'completed',
+    current: pathsToDelete.size,
+    total: pathsToDelete.size,
+    message: `Successfully resolved ${pathsToDelete.size} duplicate clone files!`,
+    percentage: 100,
+  });
+
+  return { updatedRawFiles, resolvedCount: pathsToDelete.size };
+}
+
+/**
+ * Bulk merges selected duplicate groups in batched incremental steps
+ */
+export async function batchMergeDuplicateGroupsAsync(
+  rawFiles: RawFileEntry[],
+  groupsToMerge: DuplicateGroup[],
+  options: {
+    mergeTags: boolean;
+    appendContent: boolean;
+    redirectLinks: boolean;
+  },
+  onProgress?: BatchProgressCallback,
+  batchChunkSize: number = 4
+): Promise<{ updatedRawFiles: RawFileEntry[]; resolvedCount: number; mergedGroupCount: number }> {
+  if (!rawFiles || rawFiles.length === 0 || !groupsToMerge || groupsToMerge.length === 0) {
+    onProgress?.({
+      phase: 'completed',
+      current: 0,
+      total: 0,
+      message: 'No groups selected for bulk merge.',
+      percentage: 100,
+    });
+    return { updatedRawFiles: rawFiles || [], resolvedCount: 0, mergedGroupCount: 0 };
+  }
+
+  let currentRawFiles = [...rawFiles];
+  let totalResolvedFiles = 0;
+  let mergedGroupCount = 0;
+  const totalGroups = groupsToMerge.length;
+
+  for (let i = 0; i < totalGroups; i += batchChunkSize) {
+    const chunk = groupsToMerge.slice(i, i + batchChunkSize);
+
+    for (const group of chunk) {
+      if (!group || !group.files || group.files.length < 2) continue;
+
+      // Primary is first file
+      const primaryFile = group.files[0];
+      const dupFiles = group.files.slice(1);
+
+      for (const dup of dupFiles) {
+        if (!dup || !dup.path || dup.path === primaryFile.path) continue;
+
+        // Check if both exist
+        const pExists = currentRawFiles.some((f) => f && f.path === primaryFile.path);
+        const dExists = currentRawFiles.some((f) => f && f.path === dup.path);
+        if (!pExists || !dExists) continue;
+
+        currentRawFiles = mergeDuplicateNotes(currentRawFiles, primaryFile.path, dup.path, {
+          mergeTags: options.mergeTags,
+          appendContent: options.appendContent && group.type !== 'exact-content',
+          redirectLinks: options.redirectLinks,
+        });
+
+        totalResolvedFiles++;
+      }
+      mergedGroupCount++;
+    }
+
+    const currentProgress = Math.min(totalGroups, i + chunk.length);
+    const pct = Math.round((currentProgress / totalGroups) * 95);
+
+    onProgress?.({
+      phase: 'deleting',
+      current: currentProgress,
+      total: totalGroups,
+      message: `Merged ${currentProgress} of ${totalGroups} duplicate groups (${totalResolvedFiles} files resolved)...`,
+      percentage: pct,
+    });
+
+    // Yield control to event loop
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
+  onProgress?.({
+    phase: 'completed',
+    current: totalGroups,
+    total: totalGroups,
+    message: `Finished merging ${mergedGroupCount} duplicate groups!`,
+    percentage: 100,
+  });
+
+  return {
+    updatedRawFiles: currentRawFiles,
+    resolvedCount: totalResolvedFiles,
+    mergedGroupCount,
+  };
+}
+
+/**
+ * Automatically cleans all exact duplicate notes by keeping the primary one (synchronous version)
+ */
+export function batchResolveExactDuplicates(
+  rawFiles: RawFileEntry[],
+  duplicateGroups: DuplicateGroup[]
+): { updatedRawFiles: RawFileEntry[]; resolvedCount: number } {
+  if (!rawFiles || rawFiles.length === 0 || !duplicateGroups || duplicateGroups.length === 0) {
+    return { updatedRawFiles: rawFiles || [], resolvedCount: 0 };
+  }
+
+  const exactGroups = duplicateGroups.filter((g) => g && g.type === 'exact-content');
+  if (exactGroups.length === 0) return { updatedRawFiles: rawFiles, resolvedCount: 0 };
+
+  const pathsToDelete = new Set<string>();
+  const pathsToKeep = new Set<string>();
+  const linkRedirectMap = new Map<string, string>(); // oldBaseName -> newBaseName
+
+  exactGroups.forEach((group) => {
+    if (!group || !group.files || group.files.length < 2) return;
+
+    // Filter only files that currently exist in rawFiles
+    const validGroupFiles = group.files.filter((f) => f && f.path && rawFiles.some((rf) => rf && rf.path === f.path));
+    if (validGroupFiles.length < 2) return;
+
+    // Sort to find best primary note (highest backlinks, shallowest directory depth)
+    const sorted = [...validGroupFiles].sort((a, b) => {
+      const aDepth = (a.path || '').split('/').length;
+      const bDepth = (b.path || '').split('/').length;
+      const aBacklinks = a.backlinks ? a.backlinks.length : 0;
+      const bBacklinks = b.backlinks ? b.backlinks.length : 0;
+      if (bBacklinks !== aBacklinks) {
+        return bBacklinks - aBacklinks;
+      }
+      return aDepth - bDepth;
+    });
+
+    const primaryFile = sorted.find((f) => f && f.path && !pathsToDelete.has(f.path)) || sorted[0];
+    if (!primaryFile || !primaryFile.path) return;
+
+    pathsToKeep.add(primaryFile.path);
+
+    const duplicates = sorted.filter((f) => f && f.path && f.path !== primaryFile.path && !pathsToKeep.has(f.path));
+    duplicates.forEach((d) => {
+      if (!d || !d.path) return;
+      pathsToDelete.add(d.path);
+      if (d.baseName && primaryFile.baseName && d.baseName !== primaryFile.baseName) {
+        linkRedirectMap.set(d.baseName, primaryFile.baseName);
+      }
+    });
+  });
+
+  if (pathsToDelete.size === 0) {
+    return { updatedRawFiles: rawFiles, resolvedCount: 0 };
+  }
+
+  let updatedRawFiles = rawFiles.filter((f) => f && !pathsToDelete.has(f.path));
+
+  // If any deleted files had different names, redirect incoming wikilinks in remaining files
+  if (linkRedirectMap.size > 0) {
+    updatedRawFiles = updatedRawFiles.map((file) => {
+      if (!file || file.isBinary || file.isConfigOrPlugin || !file.content) return file;
+      let newContent = file.content;
+      linkRedirectMap.forEach((newTarget, oldTarget) => {
+        if (oldTarget && newTarget && oldTarget !== newTarget) {
+          newContent = replaceLinkInContent(newContent, oldTarget, newTarget);
+        }
+      });
+      if (newContent !== file.content) {
+        return {
+          ...file,
+          content: newContent,
+          size: newContent.length,
+          lastModified: Date.now(),
+        };
+      }
+      return file;
+    });
+  }
+
+  return { updatedRawFiles, resolvedCount: pathsToDelete.size };
+}
+

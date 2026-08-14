@@ -21,6 +21,7 @@ import { BrokenLinksAuditor } from './components/BrokenLinksAuditor';
 import { OrphansAuditor } from './components/OrphansAuditor';
 import { TagsAuditor } from './components/TagsAuditor';
 import { FrontmatterAuditor } from './components/FrontmatterAuditor';
+import { DuplicatesAuditor } from './components/DuplicatesAuditor';
 import { FileListAuditor } from './components/FileListAuditor';
 import { NoteInspectorModal } from './components/NoteInspectorModal';
 import { AIInsightsModal } from './components/AIInsightsModal';
@@ -48,125 +49,26 @@ export default function App() {
   };
 
   // Re-run analysis whenever raw files change
-  const { summary, parsedFiles } = useMemo(() => {
+  const summary = useMemo(() => {
     if (!rawFiles || rawFiles.length === 0) {
-      return { summary: null, parsedFiles: [] };
+      return null;
     }
-    const audit = analyzeVault(rawFiles, vaultName);
-    const files = resolveAllVaultFiles(rawFiles, vaultName);
-    return { summary: audit, parsedFiles: files };
+    return analyzeVault(rawFiles, vaultName);
   }, [rawFiles, vaultName]);
 
-  function resolveAllVaultFiles(entries: RawFileEntry[], currentVaultName: string): VaultFile[] {
-    const audit = analyzeVault(entries, currentVaultName);
-    const list: VaultFile[] = [];
-    const fileMap = new Map<string, VaultFile>();
+  const parsedFiles = useMemo(() => summary?.parsedFiles || [], [summary]);
 
-    // Pass 1: Parse basics
-    entries.forEach((e) => {
-      const parts = e.path.replace(/\\/g, '/').split('/');
-      const name = parts[parts.length - 1];
-      const folder = parts.length > 1 ? parts.slice(0, -1).join('/') : '/';
-      const ext = name.includes('.') ? name.split('.').pop()!.toLowerCase() : 'md';
-      const isAttachment = !['md', 'canvas'].includes(ext);
-      const baseName = ext === 'md' ? name.slice(0, -3) : name;
-
-      const isOrphan = audit.orphanedItems.some((o) => o.id === e.path);
-
-      const vf: VaultFile = {
-        id: e.path,
-        name,
-        baseName,
-        path: e.path,
-        content: e.content,
-        folder,
-        extension: ext,
-        isAttachment,
-        size: e.size || e.content.length,
-        wordCount: e.content.split(/\s+/).filter(Boolean).length,
-        frontmatter: null,
-        rawFrontmatter: null,
-        hasFrontmatterError: false,
-        outgoingLinks: [],
-        backlinks: [],
-        tags: [],
-        unresolvedLinks: [],
-        isOrphan,
-        isSink: false,
-        isSource: false,
-        lastModified: e.lastModified,
-      };
-
-      fileMap.set(vf.id.toLowerCase(), vf);
-      fileMap.set(vf.baseName.toLowerCase(), vf);
-      list.push(vf);
-    });
-
-    // Pass 2: Extract real outgoing links & backlinks
-    list.forEach((file) => {
-      if (file.isAttachment) return;
-      const wikiRegex = /(!?)\[\[([^\]]+)\]\]/g;
-      const lines = file.content.split('\n');
-
-      lines.forEach((lineText, lineIdx) => {
-        let match;
-        const lineRegex = new RegExp(wikiRegex);
-        while ((match = lineRegex.exec(lineText)) !== null) {
-          const isEmbed = match[1] === '!';
-          const rawTarget = match[2];
-          const targetBase = rawTarget.split('|')[0].split('#')[0].trim();
-          const targetLower = targetBase.toLowerCase();
-
-          const targetFile =
-            fileMap.get(targetLower) ||
-            fileMap.get(targetLower + '.md') ||
-            list.find((f) => f.baseName.toLowerCase() === targetLower);
-
-          const isBroken = !targetFile;
-
-          file.outgoingLinks.push({
-            target: targetBase,
-            normalizedTarget: targetLower,
-            line: lineIdx + 1,
-            raw: match[0],
-            isEmbed,
-            isBroken,
-            resolvedPath: targetFile?.id,
-          });
-
-          if (targetFile) {
-            targetFile.backlinks.push({
-              sourceId: file.id,
-              sourceTitle: file.baseName,
-              line: lineIdx + 1,
-              snippet: lineText.trim(),
-              isEmbed,
-            });
-          }
-        }
-      });
-
-      // Tags
-      const tagSet = new Set<string>();
-      const tagRegex = /(?:^|\s)(#([a-zA-Z0-9_\-\/]+))(?=[\s,.;:!?]|$)/g;
-      let tMatch;
-      while ((tMatch = tagRegex.exec(file.content)) !== null) {
-        if (!/^\d+$/.test(tMatch[2])) tagSet.add(tMatch[2]);
+  // Keep selectedNote in sync if files are updated or removed
+  React.useEffect(() => {
+    if (selectedNote) {
+      const refreshed = parsedFiles.find((f) => f.id === selectedNote.id);
+      if (!refreshed) {
+        setSelectedNote(null);
+      } else if (refreshed !== selectedNote) {
+        setSelectedNote(refreshed);
       }
-      file.tags = Array.from(tagSet);
-
-      // Degree types
-      if (file.backlinks.length === 0 && file.outgoingLinks.length === 0) {
-        file.isOrphan = true;
-      } else if (file.backlinks.length > 0 && file.outgoingLinks.length === 0) {
-        file.isSink = true;
-      } else if (file.backlinks.length === 0 && file.outgoingLinks.length > 0) {
-        file.isSource = true;
-      }
-    });
-
-    return list;
-  }
+    }
+  }, [parsedFiles, selectedNote]);
 
   const handleVaultLoaded = (files: RawFileEntry[], name: string) => {
     setRawFiles(files);
@@ -511,6 +413,13 @@ This note was automatically initialized to provide a central node for incoming r
     );
   };
 
+  const handleUpdateRawFiles = (updated: RawFileEntry[], message?: string) => {
+    setRawFiles(updated);
+    if (message) {
+      showToast('Vault Updated', message);
+    }
+  };
+
   const handleExportReport = () => {
     if (!summary) return;
 
@@ -637,6 +546,15 @@ ${Object.entries(summary.tagFrequency)
                 onSelectNote={(note) => setSelectedNote(note)}
                 onAutoGenerateMOC={handleAutoGenerateOrphanMOC}
                 onAutoTagOrphans={handleAutoTagOrphans}
+              />
+            )}
+
+            {activeTab === 'duplicates' && (
+              <DuplicatesAuditor
+                groups={summary.duplicateGroups}
+                rawFiles={rawFiles}
+                onUpdateRawFiles={handleUpdateRawFiles}
+                onSelectFile={(note) => setSelectedNote(note)}
               />
             )}
 

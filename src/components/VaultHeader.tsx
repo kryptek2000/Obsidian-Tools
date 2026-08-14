@@ -14,6 +14,7 @@ import {
   CheckCircle2,
   BookOpen,
   Wand2,
+  Copy,
 } from 'lucide-react';
 import { ActiveTab, VaultAuditSummary } from '../types';
 
@@ -80,6 +81,13 @@ export const VaultHeader: React.FC<VaultHeaderProps> = ({
       icon: FileQuestion,
       badge: summary.orphanedNotesCount,
       badgeColor: summary.orphanedNotesCount > 0 ? 'bg-[#FEF3C7] text-[#92400E] border-[#FDE68A]' : undefined,
+    },
+    {
+      id: 'duplicates' as ActiveTab,
+      label: 'Duplicates',
+      icon: Copy,
+      badge: summary.duplicateGroupsCount,
+      badgeColor: summary.duplicateGroupsCount > 0 ? 'bg-[#FEF3C7] text-[#92400E] border-[#FDE68A]' : undefined,
     },
     { id: 'tags' as ActiveTab, label: 'Tags Audit', icon: Tags, badge: summary.uniqueTagsCount },
     {

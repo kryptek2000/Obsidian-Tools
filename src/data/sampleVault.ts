@@ -323,6 +323,63 @@ This note has broken YAML frontmatter syntax that should be flagged by the YAML 
 `,
   },
   {
+    path: '06 - Archives/Atomic Habits - Summary.md',
+    name: 'Atomic Habits - Summary.md',
+    content: `---
+title: Atomic Habits by James Clear
+author: James Clear
+rating: 5/5
+tags: [books, psychology, habit, productivity]
+date: 2026-07-20
+---
+
+# 📚 Atomic Habits - Summary
+
+An actionable framework for improving 1% every day.
+
+## The 4 Laws of Behavior Change
+1. Make it obvious
+2. Make it attractive
+3. Make it easy
+4. Make it satisfying
+
+## Connection to Note-Taking
+Daily writing habits amplify the [[Zettelkasten Method]] and [[Spaced Repetition & Flashcards]].
+`,
+  },
+  {
+    path: '01 - Projects/Weekly Review.md',
+    name: 'Weekly Review.md',
+    content: `---
+title: Weekly Review Template (Projects)
+tags: [review, productivity, projects]
+date: 2026-08-08
+---
+
+# 🔄 Weekly Project Review
+
+Check sprint progress for [[Project Obsidian Auditor]] and [[Project Neural Synapse]].
+- Status on deliverable targets
+- Identify blockers and clear backlogs
+`,
+  },
+  {
+    path: '05 - Daily Notes/Weekly Review.md',
+    name: 'Weekly Review.md',
+    content: `---
+title: Weekly Review (Personal Reflection)
+tags: [review, journal, habit]
+date: 2026-08-10
+---
+
+# 📝 Personal Weekly Reflection
+
+Reflecting on habit consistency with [[Atomic Habits - Summary]].
+- Gratitude log
+- Energy management and sleep tracker
+`,
+  },
+  {
     path: '07 - Attachments/vault-banner.png',
     name: 'vault-banner.png',
     content: '',

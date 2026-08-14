@@ -10,6 +10,7 @@ import {
   TagAuditItem,
   GraphNode,
   GraphLink,
+  DuplicateGroup,
 } from '../types';
 
 // Regex patterns for Obsidian syntax
@@ -567,6 +568,87 @@ export function analyzeVault(rawFiles: RawFileEntry[], vaultName: string = 'My O
 
   tagAuditItems.sort((a, b) => b.count - a.count);
 
+  // Step 4.5: Duplicate Detection (Identical content and Identical base names)
+  const duplicateGroups: DuplicateGroup[] = [];
+
+  // A. Exact content matches
+  const contentMap = new Map<string, VaultFile[]>();
+  allNotesList.forEach((note) => {
+    // Strip YAML frontmatter
+    const body = note.content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trim();
+    // Normalize extra line spaces
+    const normalized = body.replace(/\r\n/g, '\n').replace(/\s+/g, ' ').trim();
+    if (normalized.length >= 15) {
+      if (!contentMap.has(normalized)) {
+        contentMap.set(normalized, []);
+      }
+      contentMap.get(normalized)!.push(note);
+    }
+  });
+
+  const exactContentFilesSet = new Set<string>();
+  let groupCounter = 0;
+
+  contentMap.forEach((groupFiles) => {
+    if (groupFiles.length >= 2) {
+      groupCounter++;
+      groupFiles.forEach((f) => exactContentFilesSet.add(f.id));
+      const sizes = groupFiles.map((f) => f.size);
+      const minSize = Math.min(...sizes);
+      const maxSize = Math.max(...sizes);
+      duplicateGroups.push({
+        id: `exact-${groupCounter}-${groupFiles[0].baseName.toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
+        type: 'exact-content',
+        title: `Exact Content: "${groupFiles[0].baseName}"`,
+        files: groupFiles,
+        matchDetail: `Identical body content across ${groupFiles.length} notes (~${groupFiles[0].wordCount} words)`,
+        sizeDifference: maxSize - minSize,
+        wordCount: groupFiles[0].wordCount,
+      });
+    }
+  });
+
+  // B. Same base name collisions (cross-folder name duplicates)
+  const nameMap = new Map<string, VaultFile[]>();
+  allNotesList.forEach((note) => {
+    const key = note.baseName.toLowerCase().trim();
+    if (!nameMap.has(key)) {
+      nameMap.set(key, []);
+    }
+    nameMap.get(key)!.push(note);
+  });
+
+  nameMap.forEach((groupFiles, key) => {
+    if (groupFiles.length >= 2) {
+      // Check if all of them are already in exact content group
+      const allExact = groupFiles.every((f) => exactContentFilesSet.has(f.id));
+      if (!allExact) {
+        groupCounter++;
+        const sizes = groupFiles.map((f) => f.size);
+        const minSize = Math.min(...sizes);
+        const maxSize = Math.max(...sizes);
+        duplicateGroups.push({
+          id: `name-${groupCounter}-${key.replace(/[^a-z0-9]/g, '-')}`,
+          type: 'same-name',
+          title: `Name Collision: "${groupFiles[0].baseName}"`,
+          files: groupFiles,
+          matchDetail: `Same note title in ${groupFiles.length} separate folders (${groupFiles.map((f) => f.folder === '/' ? 'Root' : f.folder).join(', ')})`,
+          sizeDifference: maxSize - minSize,
+          wordCount: Math.max(...groupFiles.map((f) => f.wordCount)),
+        });
+      }
+    }
+  });
+
+  // Sort: Exact content matches first, then largest groups
+  duplicateGroups.sort((a, b) => {
+    if (a.type === 'exact-content' && b.type !== 'exact-content') return -1;
+    if (b.type === 'exact-content' && a.type !== 'exact-content') return 1;
+    return b.files.length - a.files.length;
+  });
+
+  const duplicateNotesCount = duplicateGroups.reduce((acc, g) => acc + g.files.length, 0);
+
   // Step 5: Compute Health Score (0 - 100)
   const totalNotes = allNotesList.length;
   const brokenLinksCount = brokenLinkItems.filter((i) => !i.isEmbed).length;
@@ -625,6 +707,8 @@ export function analyzeVault(rawFiles: RawFileEntry[], vaultName: string = 'My O
     untaggedNotesCount,
     frontmatterIssuesCount,
     unusedAttachmentsCount: unusedAttachmentItems.length,
+    duplicateGroupsCount: duplicateGroups.length,
+    duplicateNotesCount,
     uniqueTagsCount: Object.keys(tagFrequency).length,
     avgLinksPerNote,
     healthScore: score,
@@ -636,6 +720,8 @@ export function analyzeVault(rawFiles: RawFileEntry[], vaultName: string = 'My O
     frontmatterIssueItems,
     unusedAttachmentItems,
     tagAuditItems,
+    duplicateGroups,
+    parsedFiles: Array.from(parsedFiles.values()),
     obsidianSettings: hasObsidianConfig
       ? {
           hasObsidianConfig: true,

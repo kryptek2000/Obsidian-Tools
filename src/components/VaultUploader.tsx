@@ -31,34 +31,39 @@ export const VaultUploader: React.FC<VaultUploaderProps> = ({
   const [loadStatus, setLoadStatus] = useState<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Modern File System Access API
+  // Modern File System Access API with iframe / cross-origin fallback
   const handleOpenLocalFolder = async () => {
+    // Cross-origin subframes / iframes are not allowed to call showDirectoryPicker by browser security policy
+    const isInIframe = typeof window !== 'undefined' && window.self !== window.top;
+
+    if (isInIframe || !('showDirectoryPicker' in window)) {
+      // Direct standard folder picker via HTML5 input webkitdirectory
+      fileInputRef.current?.click();
+      return;
+    }
+
     try {
-      if ('showDirectoryPicker' in window) {
-        setIsLoading(true);
-        setLoadStatus('Requesting folder access...');
-        const dirHandle = await (window as any).showDirectoryPicker({
-          mode: 'read',
-        });
-        setLoadStatus(`Scanning "${dirHandle.name}" vault...`);
-        const entries = await readDirectoryHandle(dirHandle);
-        if (entries.length === 0) {
-          alert('No markdown or readable files found in the selected folder.');
-          setIsLoading(false);
-          return;
-        }
-        onVaultLoaded(entries, dirHandle.name);
-      } else {
-        // Fallback for browsers without showDirectoryPicker
-        fileInputRef.current?.click();
+      setIsLoading(true);
+      setLoadStatus('Requesting folder access...');
+      const dirHandle = await (window as any).showDirectoryPicker({
+        mode: 'read',
+      });
+      setLoadStatus(`Scanning "${dirHandle.name}" vault...`);
+      const entries = await readDirectoryHandle(dirHandle);
+      if (entries.length === 0) {
+        alert('No markdown or readable files found in the selected folder.');
+        setIsLoading(false);
+        return;
       }
+      onVaultLoaded(entries, dirHandle.name);
     } catch (err: any) {
-      if (err.name !== 'AbortError') {
-        console.error('Error opening folder:', err);
-        // Trigger fallback input
-        fileInputRef.current?.click();
-      }
       setIsLoading(false);
+      if (err.name === 'AbortError') {
+        // User closed or cancelled the dialog
+        return;
+      }
+      // Graceful fallback to file input if showDirectoryPicker throws
+      fileInputRef.current?.click();
     }
   };
 

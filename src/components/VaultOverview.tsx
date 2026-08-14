@@ -17,6 +17,7 @@ import {
   Download,
   FolderTree,
   ShieldCheck,
+  Copy,
 } from 'lucide-react';
 import { ActiveTab, VaultAuditSummary, VaultFile } from '../types';
 
@@ -406,6 +407,32 @@ export const VaultOverview: React.FC<VaultOverviewProps> = ({
                 <span>Zero orphan notes. All notes are connected into the knowledge graph!</span>
               </div>
             )}
+
+            {/* Duplicate Notes item */}
+            {summary.duplicateGroupsCount > 0 ? (
+              <div className="p-4 rounded-xl bg-[#FFFFFF] border border-[#FDE68A] flex items-center justify-between gap-4 shadow-xs">
+                <div className="flex items-start gap-3">
+                  <div className="p-1.5 rounded-lg bg-[#FEF3C7] text-[#92400E] mt-0.5 shrink-0">
+                    <Copy className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-[#92400E]">
+                      {summary.duplicateGroupsCount} Duplicate / Name Collision Group{summary.duplicateGroupsCount > 1 ? 's' : ''} ({summary.duplicateNotesCount} notes)
+                    </h4>
+                    <p className="text-xs text-[#5A5A57] mt-0.5 font-sans">
+                      Identical note clones or shared titles across different folders creating ambiguous wikilink resolution.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('duplicates')}
+                  className="px-3.5 py-1.5 rounded-md bg-[#1A1A1A] hover:bg-[#333330] text-[#FCFCF9] text-xs font-semibold shrink-0 cursor-pointer shadow-xs transition-all"
+                >
+                  Manage Duplicates
+                </button>
+              </div>
+            ) : null}
 
             {/* Frontmatter YAML issues */}
             {summary.frontmatterIssueItems.length > 0 ? (

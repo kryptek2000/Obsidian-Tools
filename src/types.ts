@@ -74,6 +74,16 @@ export interface TagAuditItem {
   potentialDuplicates?: string[]; // e.g. "productivity" vs "Productivity" or "tag" vs "tags"
 }
 
+export interface DuplicateGroup {
+  id: string;
+  type: 'exact-content' | 'same-name';
+  title: string;
+  files: VaultFile[];
+  matchDetail: string;
+  sizeDifference: number; // difference in bytes between min and max
+  wordCount: number;
+}
+
 export interface ObsidianSettingsSummary {
   hasObsidianConfig: boolean;
   communityPlugins: string[];
@@ -96,6 +106,8 @@ export interface VaultAuditSummary {
   untaggedNotesCount: number;
   frontmatterIssuesCount: number;
   unusedAttachmentsCount: number;
+  duplicateGroupsCount: number;
+  duplicateNotesCount: number;
   uniqueTagsCount: number;
   avgLinksPerNote: number;
   healthScore: number; // 0 - 100
@@ -107,6 +119,8 @@ export interface VaultAuditSummary {
   frontmatterIssueItems: FrontmatterIssueItem[];
   unusedAttachmentItems: UnusedAttachmentItem[];
   tagAuditItems: TagAuditItem[];
+  duplicateGroups: DuplicateGroup[];
+  parsedFiles: VaultFile[];
   obsidianSettings?: ObsidianSettingsSummary;
 }
 
@@ -134,4 +148,13 @@ export interface GraphLink {
   isEmbed: boolean;
 }
 
-export type ActiveTab = 'overview' | 'graph' | 'broken-links' | 'orphans' | 'tags' | 'frontmatter' | 'files' | 'ai-insights';
+export type ActiveTab =
+  | 'overview'
+  | 'graph'
+  | 'broken-links'
+  | 'orphans'
+  | 'duplicates'
+  | 'tags'
+  | 'frontmatter'
+  | 'files'
+  | 'ai-insights';
