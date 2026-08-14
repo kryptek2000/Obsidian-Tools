@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   Copy,
   GitCompare,
@@ -52,14 +52,15 @@ interface BatchProgressState {
 }
 
 export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
-  groups,
-  rawFiles,
+  groups = [],
+  rawFiles = [],
   onUpdateRawFiles,
   onSelectFile,
 }) => {
+  const isMountedRef = useRef(true);
   const [filterType, setFilterType] = useState<FilterType>('all');
   const [searchQuery, setSearchQuery] = useState('');
-  const [expandedGroupIds, setExpandedGroupIds] = useState<Set<string>>(() => new Set(groups.map((g) => g.id)));
+  const [expandedGroupIds, setExpandedGroupIds] = useState<Set<string>>(() => new Set((groups || []).filter(Boolean).map((g) => g.id)));
 
   // Diff comparison modal state
   const [compareGroup, setCompareGroup] = useState<DuplicateGroup | null>(null);
@@ -92,69 +93,74 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
 
   // Action status toast/message
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    };
+  }, []);
 
   const showToast = (msg: string) => {
+    if (!isMountedRef.current) return;
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
     setActionNotice(msg);
-    setTimeout(() => setActionNotice(null), 4000);
+    toastTimeoutRef.current = setTimeout(() => {
+      if (isMountedRef.current) {
+        setActionNotice(null);
+      }
+    }, 4000);
   };
 
   // Group stats
   const stats = useMemo(() => {
-    const exactGroups = groups.filter((g) => g && g.type === 'exact-content');
-    const sameNameGroups = groups.filter((g) => g && g.type === 'same-name');
+    const validGroups = (groups || []).filter((g): g is DuplicateGroup => Boolean(g && Array.isArray(g.files)));
+    const exactGroups = validGroups.filter((g) => g.type === 'exact-content');
+    const sameNameGroups = validGroups.filter((g) => g.type === 'same-name');
     const exactClonesCount = exactGroups.reduce((acc, g) => acc + Math.max(0, (g.files?.length || 0) - 1), 0);
-    const totalDuplicateNotes = groups.reduce((acc, g) => acc + (g.files?.length || 0), 0);
+    const totalDuplicateNotes = validGroups.reduce((acc, g) => acc + (g.files?.length || 0), 0);
     const potentialBytesSaved = exactGroups.reduce((acc, g) => {
       if (!g.files || g.files.length === 0) return acc;
-      const sizes = g.files.map((f) => f.size || 0);
+      const sizes = g.files.map((f) => f?.size || 0);
+      if (sizes.length === 0) return acc;
       const totalSize = sizes.reduce((a, b) => a + b, 0);
       const keepSize = Math.max(...sizes);
-      return acc + (totalSize - keepSize);
+      return acc + Math.max(0, totalSize - keepSize);
     }, 0);
 
     return {
-      totalGroups: groups.length,
+      totalGroups: validGroups.length,
       exactCount: exactGroups.length,
       exactClonesCount,
       sameNameCount: sameNameGroups.length,
       totalDuplicateNotes,
-      potentialBytesSaved,
+      potentialBytesSaved: Math.max(0, potentialBytesSaved),
     };
   }, [groups]);
 
-  // Sync expanded group IDs when groups list changes
-  React.useEffect(() => {
-    setExpandedGroupIds((prev) => {
-      const currentIds = new Set(groups.map((g) => g.id));
-      const next = new Set<string>();
-      groups.forEach((g) => {
-        if (prev.has(g.id) || !prev.size) {
-          next.add(g.id);
-        }
-      });
-      return next.size > 0 ? next : currentIds;
-    });
-  }, [groups]);
-
   // Synchronize modal state if files are deleted or modified
-  React.useEffect(() => {
+  useEffect(() => {
     if (compareGroup) {
-      const refreshedGroup = groups.find((g) => g.id === compareGroup.id);
+      const refreshedGroup = (groups || []).find((g) => g && g.id === compareGroup.id);
       if (!refreshedGroup || !refreshedGroup.files || refreshedGroup.files.length < 2) {
         setCompareGroup(null);
         setCompareFileA(null);
         setCompareFileB(null);
       } else {
+        const fileAExists = refreshedGroup.files.find((f) => f && f.path === compareFileA?.path);
+        const fileBExists = refreshedGroup.files.find((f) => f && f.path === compareFileB?.path);
         setCompareGroup(refreshedGroup);
-        const fileAExists = refreshedGroup.files.find((f) => f.path === compareFileA?.path);
-        const fileBExists = refreshedGroup.files.find((f) => f.path === compareFileB?.path);
-        setCompareFileA(fileAExists || refreshedGroup.files[0]);
-        setCompareFileB(fileBExists || refreshedGroup.files[1]);
+        if (fileAExists) setCompareFileA(fileAExists);
+        else setCompareFileA(refreshedGroup.files[0] || null);
+        if (fileBExists) setCompareFileB(fileBExists);
+        else setCompareFileB(refreshedGroup.files[1] || refreshedGroup.files[0] || null);
       }
     }
 
     if (mergeModalGroup) {
-      const refreshedGroup = groups.find((g) => g.id === mergeModalGroup.id);
+      const refreshedGroup = (groups || []).find((g) => g && g.id === mergeModalGroup.id);
       if (!refreshedGroup || !refreshedGroup.files || refreshedGroup.files.length < 2) {
         setMergeModalGroup(null);
       } else {
@@ -163,7 +169,7 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
     }
 
     if (deleteFileItem) {
-      const fileStillExists = rawFiles.some((f) => f && f.path === deleteFileItem.file?.path);
+      const fileStillExists = (rawFiles || []).some((f) => f && f.path === deleteFileItem.file?.path);
       if (!fileStillExists) {
         setDeleteFileItem(null);
       }
@@ -172,7 +178,7 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
 
   // Filtered groups
   const filteredGroups = useMemo(() => {
-    return groups.filter((group) => {
+    return (groups || []).filter((group) => {
       if (!group) return false;
       if (filterType !== 'all' && group.type !== filterType) return false;
 
@@ -181,9 +187,10 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
         const matchesTitle = (group.title || '').toLowerCase().includes(q);
         const matchesFiles = (group.files || []).some(
           (f) =>
-            (f.name || '').toLowerCase().includes(q) ||
-            (f.folder || '').toLowerCase().includes(q) ||
-            (f.tags || []).some((t) => t.toLowerCase().includes(q))
+            f &&
+            ((f.name || '').toLowerCase().includes(q) ||
+              (f.folder || '').toLowerCase().includes(q) ||
+              (f.tags || []).some((t) => t && t.toLowerCase().includes(q)))
         );
         if (!matchesTitle && !matchesFiles) return false;
       }
@@ -217,17 +224,38 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
 
     try {
       const { updatedRawFiles, resolvedCount } = await batchResolveExactDuplicatesAsync(
-        rawFiles,
-        groups,
+        rawFiles || [],
+        groups || [],
         (progress) => {
-          setBatchProgress({
-            isActive: true,
-            title: 'Auto-Cleaning Redundant Clones',
-            ...progress,
-          });
+          if (isMountedRef.current) {
+            setBatchProgress({
+              isActive: true,
+              title: 'Auto-Cleaning Redundant Clones',
+              ...progress,
+            });
+          }
         },
         6 // batch chunk size
       );
+
+      if (isMountedRef.current) {
+        setBatchProgress({
+          isActive: false,
+          title: '',
+          phase: 'completed',
+          current: 0,
+          total: 0,
+          percentage: 100,
+          message: '',
+        });
+        setIsCleaning(false);
+        setCompareGroup(null);
+        setMergeModalGroup(null);
+        setDeleteFileItem(null);
+      }
+
+      // Yield control so modal dismisses cleanly before dispatching parent state update
+      await new Promise((resolve) => setTimeout(resolve, 80));
 
       if (resolvedCount === 0) {
         showToast('No exact content duplicates found to clean.');
@@ -240,18 +268,20 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
       }
     } catch (err) {
       console.error('Batch clean failed:', err);
-      showToast('Encountered an issue during batch cleanup.');
+      if (isMountedRef.current) {
+        showToast('Encountered an issue during batch cleanup.');
+      }
     } finally {
-      setTimeout(() => {
+      if (isMountedRef.current) {
         setBatchProgress((prev) => ({ ...prev, isActive: false }));
         setIsCleaning(false);
-      }, 400);
+      }
     }
   };
 
   // Bulk merge all exact duplicate groups in non-blocking incremental batches
   const handleBulkMergeExactGroups = async () => {
-    const exactGroups = groups.filter((g) => g && g.type === 'exact-content');
+    const exactGroups = (groups || []).filter((g) => g && g.type === 'exact-content');
     if (exactGroups.length === 0 || isCleaning || batchProgress.isActive) return;
 
     setIsCleaning(true);
@@ -267,7 +297,7 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
 
     try {
       const { updatedRawFiles, resolvedCount, mergedGroupCount } = await batchMergeDuplicateGroupsAsync(
-        rawFiles,
+        rawFiles || [],
         exactGroups,
         {
           mergeTags: true,
@@ -275,14 +305,35 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
           redirectLinks: true,
         },
         (progress) => {
-          setBatchProgress({
-            isActive: true,
-            title: 'Bulk Merging Duplicate Groups',
-            ...progress,
-          });
+          if (isMountedRef.current) {
+            setBatchProgress({
+              isActive: true,
+              title: 'Bulk Merging Duplicate Groups',
+              ...progress,
+            });
+          }
         },
         4 // batch chunk size
       );
+
+      if (isMountedRef.current) {
+        setBatchProgress({
+          isActive: false,
+          title: '',
+          phase: 'completed',
+          current: 0,
+          total: 0,
+          percentage: 100,
+          message: '',
+        });
+        setIsCleaning(false);
+        setCompareGroup(null);
+        setMergeModalGroup(null);
+        setDeleteFileItem(null);
+      }
+
+      // Yield control so modal dismisses cleanly before dispatching parent state update
+      await new Promise((resolve) => setTimeout(resolve, 80));
 
       if (resolvedCount === 0) {
         showToast('No duplicate notes needed merging.');
@@ -295,12 +346,14 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
       }
     } catch (err) {
       console.error('Bulk merge failed:', err);
-      showToast('Failed to complete bulk merge.');
+      if (isMountedRef.current) {
+        showToast('Failed to complete bulk merge.');
+      }
     } finally {
-      setTimeout(() => {
+      if (isMountedRef.current) {
         setBatchProgress((prev) => ({ ...prev, isActive: false }));
         setIsCleaning(false);
-      }, 400);
+      }
     }
   };
 
@@ -308,30 +361,40 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
   const handleOpenCompare = (group: DuplicateGroup) => {
     if (!group || !group.files || group.files.length < 2) return;
     setCompareGroup(group);
-    setCompareFileA(group.files[0]);
-    setCompareFileB(group.files[1]);
+    setCompareFileA(group.files[0] || null);
+    setCompareFileB(group.files[1] || group.files[0] || null);
   };
 
   // Open Merge Modal
-  const handleOpenMerge = (group: DuplicateGroup, defaultPrimary?: VaultFile, defaultDup?: VaultFile) => {
+  const handleOpenMerge = (group: DuplicateGroup, defaultPrimary?: VaultFile | null, defaultDup?: VaultFile | null) => {
     if (!group || !group.files || group.files.length < 2) return;
-    setMergeModalGroup(group);
     const prim = defaultPrimary || group.files[0];
-    const dup = defaultDup || (group.files.find((f) => f.path !== prim.path) || group.files[1]);
+    if (!prim || !prim.path) return;
+    const dup = defaultDup || (group.files.find((f) => f && f.path !== prim.path) || group.files[1]);
+    if (!dup || !dup.path) return;
+
+    setMergeModalGroup(group);
     setPrimaryPath(prim.path);
-    setDuplicatePath(dup?.path || '');
+    setDuplicatePath(dup.path);
     setAppendContent(group.type !== 'exact-content');
   };
 
   // Execute Merge
-  const handleExecuteMerge = () => {
+  const handleExecuteMerge = async () => {
     if (!primaryPath || !duplicatePath || primaryPath === duplicatePath) return;
 
-    try {
-      const primaryFile = rawFiles.find((f) => f && f.path === primaryPath);
-      const dupFile = rawFiles.find((f) => f && f.path === duplicatePath);
+    // Reset modals FIRST to prevent rendering during parent state transition
+    setMergeModalGroup(null);
+    if (compareGroup) setCompareGroup(null);
 
-      const updated = mergeDuplicateNotes(rawFiles, primaryPath, duplicatePath, {
+    // Yield to allow modal unmount
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    try {
+      const primaryFile = (rawFiles || []).find((f) => f && f.path === primaryPath);
+      const dupFile = (rawFiles || []).find((f) => f && f.path === duplicatePath);
+
+      const updated = mergeDuplicateNotes(rawFiles || [], primaryPath, duplicatePath, {
         mergeTags,
         appendContent,
         redirectLinks,
@@ -341,32 +404,35 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
         updated,
         `Merged "${dupFile?.name || duplicatePath}" into "${primaryFile?.name || primaryPath}"`
       );
-      showToast(`Merged duplicate note successfully!`);
     } catch (err) {
       console.error('Merge error:', err);
       showToast('Failed to merge notes.');
-    } finally {
-      setMergeModalGroup(null);
-      if (compareGroup) setCompareGroup(null);
     }
   };
 
   // Open Delete Modal
   const handleOpenDelete = (file: VaultFile, group: DuplicateGroup) => {
     if (!file || !group) return;
-    const alternative = (group.files || []).find((f) => f.path !== file.path);
+    const alternative = (group.files || []).find((f) => f && f.path !== file.path);
     setDeleteFileItem({ file, group });
     setRedirectOnDeletePath(alternative?.path || '');
   };
 
   // Execute Delete
-  const handleExecuteDelete = () => {
+  const handleExecuteDelete = async () => {
     if (!deleteFileItem || !deleteFileItem.file) return;
 
+    const { file } = deleteFileItem;
+    // Reset modals FIRST
+    setDeleteFileItem(null);
+    if (compareGroup) setCompareGroup(null);
+
+    // Yield to allow modal unmount
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
     try {
-      const { file } = deleteFileItem;
       const updated = deleteDuplicateNote(
-        rawFiles,
+        rawFiles || [],
         file.path,
         redirectOnDeletePath ? redirectOnDeletePath : undefined
       );
@@ -375,13 +441,9 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
         updated,
         `Deleted duplicate note "${file.name}" from ${file.folder}`
       );
-      showToast(`Deleted duplicate note "${file.name}"`);
     } catch (err) {
       console.error('Delete error:', err);
       showToast('Failed to delete duplicate note.');
-    } finally {
-      setDeleteFileItem(null);
-      if (compareGroup) setCompareGroup(null);
     }
   };
 
@@ -408,7 +470,7 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
                 Duplicate & Collision Auditor
               </span>
               <span className="text-xs text-[#8C8C88] font-mono">
-                {groups.length} group{groups.length === 1 ? '' : 's'} identified
+                {(groups || []).length} group{(groups || []).length === 1 ? '' : 's'} identified
               </span>
             </div>
             <h2 className="text-2xl font-serif font-bold text-[#1A1A1A] tracking-tight">
@@ -518,7 +580,7 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
                 : 'text-[#5A5A57] hover:text-[#1A1A1A]'
             }`}
           >
-            All Duplicates ({groups.length})
+            All Duplicates ({(groups || []).length})
           </button>
           <button
             id="filter-duplicates-exact"
@@ -600,7 +662,7 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
 
                     <div>
                       <div className="flex items-center gap-2 flex-wrap">
-                        <h3 className="text-sm font-semibold text-[#1A1A1A]">{group.title}</h3>
+                        <h3 className="text-sm font-semibold text-[#1A1A1A]">{group.title || 'Duplicate Group'}</h3>
                         <span
                           className={`text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full border ${
                             isExact
@@ -611,7 +673,7 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
                           {isExact ? 'Exact Content Match' : 'Name Collision'}
                         </span>
                         <span className="text-[11px] text-[#8C8C88] font-mono">
-                          {group.files.length} notes
+                          {(group.files || []).length} notes
                         </span>
                       </div>
                       <p className="text-xs text-[#5A5A57] mt-0.5">{group.matchDetail}</p>
@@ -656,92 +718,100 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
                 {/* Group Files List */}
                 {isExpanded && (
                   <div className="divide-y divide-[#E5E5E1]/70">
-                    {group.files.map((file, idx) => (
-                      <div
-                        key={file.id}
-                        id={`file-duplicate-row-${file.id.replace(/[^a-zA-Z0-9]/g, '-')}`}
-                        className="p-4 hover:bg-[#F7F7F4]/50 transition-colors flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
-                      >
-                        <div className="flex items-start gap-3 min-w-0">
-                          <div className="w-7 h-7 rounded-lg bg-[#F0F0ED] text-[#5A5A57] flex items-center justify-center shrink-0 mt-0.5">
-                            <FileText className="w-3.5 h-3.5" />
-                          </div>
+                    {(group.files || []).map((file, idx) => {
+                      if (!file) return null;
+                      const fileId = file.id || file.path || `file-${idx}`;
+                      const safeId = fileId.replace(/[^a-zA-Z0-9]/g, '-');
+                      const backlinksCount = Array.isArray(file.backlinks) ? file.backlinks.length : 0;
+                      const tagsList = Array.isArray(file.tags) ? file.tags : [];
 
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="text-xs font-semibold text-[#1A1A1A] truncate">{file.name}</span>
-                              {idx === 0 && (
-                                <span className="text-[10px] font-mono bg-[#E0E7FF] text-[#3730A3] border border-[#C7D2FE] px-1.5 py-0.2 rounded-md">
-                                  Default Primary
+                      return (
+                        <div
+                          key={fileId}
+                          id={`file-duplicate-row-${safeId}`}
+                          className="p-4 hover:bg-[#F7F7F4]/50 transition-colors flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+                        >
+                          <div className="flex items-start gap-3 min-w-0">
+                            <div className="w-7 h-7 rounded-lg bg-[#F0F0ED] text-[#5A5A57] flex items-center justify-center shrink-0 mt-0.5">
+                              <FileText className="w-3.5 h-3.5" />
+                            </div>
+
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-xs font-semibold text-[#1A1A1A] truncate">{file.name || file.path}</span>
+                                {idx === 0 && (
+                                  <span className="text-[10px] font-mono bg-[#E0E7FF] text-[#3730A3] border border-[#C7D2FE] px-1.5 py-0.2 rounded-md">
+                                    Default Primary
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="flex items-center gap-3 text-[11px] text-[#5A5A57] mt-1 flex-wrap font-sans">
+                                <span className="flex items-center gap-1 text-[#8C8C88]">
+                                  <Folder className="w-3 h-3" />
+                                  <span className="font-mono text-[#1A1A1A]">{file.folder === '/' ? 'Root' : file.folder || 'Root'}</span>
                                 </span>
+                                <span>•</span>
+                                <span>{file.wordCount || 0} words</span>
+                                <span>•</span>
+                                <span>{file.size || 0} bytes</span>
+                                <span>•</span>
+                                <span className="flex items-center gap-1 text-[#4338CA]">
+                                  <Link2 className="w-3.5 h-3.5" />
+                                  {backlinksCount} backlinks
+                                </span>
+                              </div>
+
+                              {/* Tags list */}
+                              {tagsList.length > 0 && (
+                                <div className="flex items-center gap-1 mt-1.5 flex-wrap">
+                                  {tagsList.map((t) => (
+                                    <span
+                                      key={t}
+                                      className="text-[10px] font-mono bg-[#F0F0ED] text-[#5A5A57] px-1.5 py-0.2 rounded-md border border-[#E5E5E1]"
+                                    >
+                                      #{t}
+                                    </span>
+                                  ))}
+                                </div>
                               )}
                             </div>
+                          </div>
 
-                            <div className="flex items-center gap-3 text-[11px] text-[#5A5A57] mt-1 flex-wrap font-sans">
-                              <span className="flex items-center gap-1 text-[#8C8C88]">
-                                <Folder className="w-3 h-3" />
-                                <span className="font-mono text-[#1A1A1A]">{file.folder === '/' ? 'Root' : file.folder}</span>
-                              </span>
-                              <span>•</span>
-                              <span>{file.wordCount} words</span>
-                              <span>•</span>
-                              <span>{file.size} bytes</span>
-                              <span>•</span>
-                              <span className="flex items-center gap-1 text-[#4338CA]">
-                                <Link2 className="w-3 h-3" />
-                                {file.backlinks.length} backlinks
-                              </span>
-                            </div>
-
-                            {/* Tags list */}
-                            {file.tags.length > 0 && (
-                              <div className="flex items-center gap-1 mt-1.5 flex-wrap">
-                                {file.tags.map((t) => (
-                                  <span
-                                    key={t}
-                                    className="text-[10px] font-mono bg-[#F0F0ED] text-[#5A5A57] px-1.5 py-0.2 rounded-md border border-[#E5E5E1]"
-                                  >
-                                    #{t}
-                                  </span>
-                                ))}
-                              </div>
+                          {/* File Action Controls */}
+                          <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                            {onSelectFile && (
+                              <button
+                                type="button"
+                                onClick={() => onSelectFile(file)}
+                                className="px-2.5 py-1 text-xs text-[#5A5A57] hover:text-[#1A1A1A] hover:bg-[#F0F0ED] rounded-lg transition-colors cursor-pointer"
+                              >
+                                Inspect
+                              </button>
                             )}
+
+                            <button
+                              id={`btn-merge-into-primary-${safeId}`}
+                              type="button"
+                              onClick={() => handleOpenMerge(group, (group.files || []).find((f) => f && f.path !== file?.path) || null, file)}
+                              className="px-2.5 py-1 text-xs font-medium text-[#1A1A1A] bg-[#FFFFFF] hover:bg-[#F7F7F4] border border-[#E5E5E1] rounded-lg transition-colors cursor-pointer shadow-xs"
+                            >
+                              Merge into Other
+                            </button>
+
+                            <button
+                              id={`btn-delete-duplicate-${safeId}`}
+                              type="button"
+                              onClick={() => handleOpenDelete(file, group)}
+                              className="p-1.5 text-xs text-[#DC2626] hover:bg-[#FEF2F2] border border-transparent hover:border-[#FEE2E2] rounded-lg transition-colors cursor-pointer"
+                              title="Delete this duplicate file"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
                           </div>
                         </div>
-
-                        {/* File Action Controls */}
-                        <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
-                          {onSelectFile && (
-                            <button
-                              type="button"
-                              onClick={() => onSelectFile(file)}
-                              className="px-2.5 py-1 text-xs text-[#5A5A57] hover:text-[#1A1A1A] hover:bg-[#F0F0ED] rounded-lg transition-colors cursor-pointer"
-                            >
-                              Inspect
-                            </button>
-                          )}
-
-                          <button
-                            id={`btn-merge-into-primary-${file.id.replace(/[^a-zA-Z0-9]/g, '-')}`}
-                            type="button"
-                            onClick={() => handleOpenMerge(group, group.files.find((f) => f.path !== file.path), file)}
-                            className="px-2.5 py-1 text-xs font-medium text-[#1A1A1A] bg-[#FFFFFF] hover:bg-[#F7F7F4] border border-[#E5E5E1] rounded-lg transition-colors cursor-pointer shadow-xs"
-                          >
-                            Merge into Other
-                          </button>
-
-                          <button
-                            id={`btn-delete-duplicate-${file.id.replace(/[^a-zA-Z0-9]/g, '-')}`}
-                            type="button"
-                            onClick={() => handleOpenDelete(file, group)}
-                            className="p-1.5 text-xs text-[#DC2626] hover:bg-[#FEF2F2] border border-transparent hover:border-[#FEE2E2] rounded-lg transition-colors cursor-pointer"
-                            title="Delete this duplicate file"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -779,19 +849,19 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
             </div>
 
             {/* Note Selector Pickers (if group has 3+ files) */}
-            {compareGroup.files.length > 2 && (
+            {compareGroup.files && compareGroup.files.length > 2 && (
               <div className="px-5 py-2.5 bg-[#F7F7F4] border-b border-[#E5E5E1] flex items-center justify-between text-xs gap-4">
                 <div className="flex items-center gap-2">
                   <span className="font-medium text-[#5A5A57]">Left File:</span>
                   <select
-                    value={compareFileA.path}
+                    value={compareFileA?.path || ''}
                     onChange={(e) => {
-                      const found = compareGroup.files.find((f) => f.path === e.target.value);
+                      const found = (compareGroup.files || []).find((f) => f && f.path === e.target.value);
                       if (found) setCompareFileA(found);
                     }}
                     className="bg-[#FFFFFF] border border-[#E5E5E1] rounded-lg px-2 py-1 text-xs text-[#1A1A1A]"
                   >
-                    {compareGroup.files.map((f) => (
+                    {(compareGroup.files || []).map((f) => (
                       <option key={f.path} value={f.path}>
                         {f.folder}/{f.name}
                       </option>
@@ -802,14 +872,14 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
                 <div className="flex items-center gap-2">
                   <span className="font-medium text-[#5A5A57]">Right File:</span>
                   <select
-                    value={compareFileB.path}
+                    value={compareFileB?.path || ''}
                     onChange={(e) => {
-                      const found = compareGroup.files.find((f) => f.path === e.target.value);
+                      const found = (compareGroup.files || []).find((f) => f && f.path === e.target.value);
                       if (found) setCompareFileB(found);
                     }}
                     className="bg-[#FFFFFF] border border-[#E5E5E1] rounded-lg px-2 py-1 text-xs text-[#1A1A1A]"
                   >
-                    {compareGroup.files.map((f) => (
+                    {(compareGroup.files || []).map((f) => (
                       <option key={f.path} value={f.path}>
                         {f.folder}/{f.name}
                       </option>
@@ -975,9 +1045,9 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
                   }}
                   className="w-full bg-[#FFFFFF] border border-[#E5E5E1] rounded-xl px-3 py-2 text-xs text-[#1A1A1A] focus:outline-none focus:border-[#1A1A1A]"
                 >
-                  {mergeModalGroup.files.map((f) => (
+                  {(mergeModalGroup.files || []).map((f) => (
                     <option key={f.path} value={f.path}>
-                      {f.path} ({f.wordCount} words, {f.backlinks.length} backlinks)
+                      {f.path} ({f.wordCount || 0} words, {f.backlinks?.length || 0} backlinks)
                     </option>
                   ))}
                 </select>
@@ -993,11 +1063,11 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
                   onChange={(e) => setDuplicatePath(e.target.value)}
                   className="w-full bg-[#FFFFFF] border border-[#E5E5E1] rounded-xl px-3 py-2 text-xs text-[#1A1A1A] focus:outline-none focus:border-[#1A1A1A]"
                 >
-                  {mergeModalGroup.files
-                    .filter((f) => f.path !== primaryPath)
+                  {(mergeModalGroup.files || [])
+                    .filter((f) => f && f.path !== primaryPath)
                     .map((f) => (
                       <option key={f.path} value={f.path}>
-                        {f.path} ({f.wordCount} words)
+                        {f.path} ({f.wordCount || 0} words)
                       </option>
                     ))}
                 </select>
@@ -1104,14 +1174,14 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
 
             <div className="p-5 space-y-4">
               <p className="text-xs text-[#1A1A1A]">
-                Are you sure you want to delete <strong className="font-mono text-[#B91C1C]">{deleteFileItem.file.name}</strong> from <strong className="font-mono">{deleteFileItem.file.folder}</strong>?
+                Are you sure you want to delete <strong className="font-mono text-[#B91C1C]">{deleteFileItem.file?.name || 'this note'}</strong> from <strong className="font-mono">{deleteFileItem.file?.folder || '/'}</strong>?
               </p>
 
-              {deleteFileItem.file.backlinks.length > 0 && (
+              {(deleteFileItem.file?.backlinks?.length || 0) > 0 && (
                 <div className="p-3.5 rounded-xl bg-[#FEF3C7] border border-[#FDE68A]">
                   <div className="flex items-center gap-2 text-xs font-semibold text-[#92400E] mb-1">
                     <AlertTriangle className="w-3.5 h-3.5" />
-                    <span>This note has {deleteFileItem.file.backlinks.length} incoming backlinks!</span>
+                    <span>This note has {deleteFileItem.file?.backlinks?.length || 0} incoming backlinks!</span>
                   </div>
                   <p className="text-[11px] text-[#78350F] mb-2">
                     Redirect backlinks to the preserved note to avoid creating broken links:
@@ -1122,8 +1192,8 @@ export const DuplicatesAuditor: React.FC<DuplicatesAuditorProps> = ({
                     className="w-full bg-[#FFFFFF] border border-[#FDE68A] rounded-lg px-2.5 py-1.5 text-xs text-[#1A1A1A]"
                   >
                     <option value="">Do not redirect (leave broken)</option>
-                    {deleteFileItem.group.files
-                      .filter((f) => f.path !== deleteFileItem.file.path)
+                    {(deleteFileItem.group?.files || [])
+                      .filter((f) => f && f.path !== deleteFileItem.file?.path)
                       .map((f) => (
                         <option key={f.path} value={f.path}>
                           Redirect to: {f.path}

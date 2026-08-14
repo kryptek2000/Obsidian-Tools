@@ -13,11 +13,11 @@ import {
   DuplicateGroup,
 } from '../types';
 
-// Regex patterns for Obsidian syntax
-const WIKILINK_REGEX = /(!?)\[\[([^\]]+)\]\]/g;
-const MARKDOWN_LINK_REGEX = /(!?)\[([^\]]*)\]\(([^)]+)\)/g;
+// Static regex definitions (compiled once)
+const WIKILINK_GLOBAL_REGEX = /(!?)\[\[([^\]\n]+)\]\]/g;
+const MARKDOWN_LINK_GLOBAL_REGEX = /(!?)\[([^\]\n]*)\]\(([^)\n]+)\)/g;
 const FRONTMATTER_REGEX = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
-const INLINE_TAG_REGEX = /(?:^|\s)(#([a-zA-Z0-9_\-\/]+))(?=[\s,.;:!?]|$)/g;
+const INLINE_TAG_REGEX = /(?:^|\s)#([a-zA-Z0-9_\-\/]+)(?=[\s,.;:!?]|$)/g;
 
 export interface RawFileEntry {
   path: string;
@@ -34,7 +34,7 @@ export interface RawFileEntry {
  * Normalizes a target string from a wikilink or markdown link
  */
 export function normalizeTargetName(rawTarget: string): { targetBase: string; heading?: string; alias?: string } {
-  let target = rawTarget.trim();
+  let target = (rawTarget || '').trim();
   let alias: string | undefined;
   let heading: string | undefined;
 
@@ -57,23 +57,21 @@ export function normalizeTargetName(rawTarget: string): { targetBase: string; he
     target = target.slice(0, -3);
   }
 
-  // If path contains folders, extract base name or clean path
   const targetBase = target;
-
   return { targetBase, heading, alias };
 }
 
 /**
- * Parse a single markdown file content
+ * Parse a single markdown file content with high efficiency
  */
 export function parseMarkdownFile(file: RawFileEntry): Omit<VaultFile, 'backlinks' | 'unresolvedLinks' | 'isOrphan' | 'isSink' | 'isSource'> {
-  const path = file.path.replace(/\\/g, '/');
+  const path = (file.path || '').replace(/\\/g, '/');
   const pathParts = path.split('/');
-  const name = pathParts[pathParts.length - 1];
+  const name = pathParts[pathParts.length - 1] || 'untitled.md';
   const folder = pathParts.length > 1 ? pathParts.slice(0, -1).join('/') : '/';
   const ext = name.includes('.') ? name.split('.').pop()!.toLowerCase() : 'md';
-  const isConfigOrPlugin = file.isConfigOrPlugin || path.startsWith('.obsidian/') || path.includes('/.obsidian/');
-  const isAttachment = isConfigOrPlugin || !['md', 'canvas'].includes(ext);
+  const isConfigOrPlugin = Boolean(file.isConfigOrPlugin || path.startsWith('.obsidian/') || path.includes('/.obsidian/'));
+  const isAttachment = Boolean(isConfigOrPlugin || !['md', 'canvas'].includes(ext));
   const baseName = ext === 'md' ? name.slice(0, -3) : name;
 
   if (isAttachment) {
@@ -97,17 +95,19 @@ export function parseMarkdownFile(file: RawFileEntry): Omit<VaultFile, 'backlink
     };
   }
 
+  const content = file.content || '';
+
   // Parse frontmatter
   let frontmatter: Record<string, any> | null = null;
   let rawFrontmatter: string | null = null;
   let hasFrontmatterError = false;
   let frontmatterErrorMsg: string | undefined;
-  let bodyContent = file.content;
+  let bodyContent = content;
 
-  const fmMatch = file.content.match(FRONTMATTER_REGEX);
+  const fmMatch = content.match(FRONTMATTER_REGEX);
   if (fmMatch) {
     rawFrontmatter = fmMatch[1];
-    bodyContent = file.content.slice(fmMatch[0].length);
+    bodyContent = content.slice(fmMatch[0].length);
     try {
       const parsed = yaml.load(rawFrontmatter);
       if (parsed && typeof parsed === 'object') {
@@ -123,12 +123,12 @@ export function parseMarkdownFile(file: RawFileEntry): Omit<VaultFile, 'backlink
   const tagsSet = new Set<string>();
 
   if (frontmatter) {
-    // tags or tag property in YAML
     const fmTags = frontmatter.tags || frontmatter.tag;
     if (Array.isArray(fmTags)) {
       fmTags.forEach((t) => {
         if (typeof t === 'string') {
-          tagsSet.add(t.startsWith('#') ? t.slice(1).trim() : t.trim());
+          const clean = t.startsWith('#') ? t.slice(1).trim() : t.trim();
+          if (clean) tagsSet.add(clean);
         }
       });
     } else if (typeof fmTags === 'string') {
@@ -139,102 +139,110 @@ export function parseMarkdownFile(file: RawFileEntry): Omit<VaultFile, 'backlink
     }
   }
 
-  // Inline tags in body
-  const lines = bodyContent.split('\n');
+  // Fast inline tags scan (excluding code fences)
+  const bodyLines = bodyContent.split('\n');
   let inCodeBlock = false;
-
-  lines.forEach((line) => {
+  for (let i = 0; i < bodyLines.length; i++) {
+    const line = bodyLines[i];
     if (line.trim().startsWith('```')) {
       inCodeBlock = !inCodeBlock;
-      return;
+      continue;
     }
-    if (inCodeBlock) return;
+    if (inCodeBlock || !line.includes('#')) continue;
 
+    INLINE_TAG_REGEX.lastIndex = 0;
     let match;
-    const lineTagRegex = new RegExp(INLINE_TAG_REGEX);
-    while ((match = lineTagRegex.exec(line)) !== null) {
-      const tagContent = match[2];
-      // Avoid pure number hashes like #1 or markdown headings
+    while ((match = INLINE_TAG_REGEX.exec(line)) !== null) {
+      const tagContent = match[1];
       if (tagContent && !/^\d+$/.test(tagContent)) {
         tagsSet.add(tagContent);
       }
     }
-  });
+  }
 
-  // Extract Outgoing Links
+  // Extract Outgoing Links with line number calculation
   const outgoingLinks: OutgoingLink[] = [];
-  const fullLines = file.content.split('\n');
+  const fullLines = content.split('\n');
 
-  fullLines.forEach((lineText, lineIdx) => {
-    // 1. Wikilinks [[target]] and ![[embed]]
-    let match;
-    const wikiRegex = new RegExp(WIKILINK_REGEX);
-    while ((match = wikiRegex.exec(lineText)) !== null) {
-      const isEmbed = match[1] === '!';
-      const rawTarget = match[2];
-      const { targetBase, heading, alias } = normalizeTargetName(rawTarget);
+  for (let lineIdx = 0; lineIdx < fullLines.length; lineIdx++) {
+    const lineText = fullLines[lineIdx];
+    if (!lineText) continue;
 
-      // Skip empty or self-heading only links
-      if (!targetBase && heading) {
-        continue; // link to heading within same note
-      }
+    // 1. Wikilinks [[target]]
+    if (lineText.includes('[[')) {
+      WIKILINK_GLOBAL_REGEX.lastIndex = 0;
+      let match;
+      while ((match = WIKILINK_GLOBAL_REGEX.exec(lineText)) !== null) {
+        const isEmbed = match[1] === '!';
+        const rawTarget = match[2];
+        const { targetBase, heading, alias } = normalizeTargetName(rawTarget);
 
-      if (targetBase) {
-        outgoingLinks.push({
-          target: targetBase,
-          normalizedTarget: targetBase.toLowerCase(),
-          alias,
-          heading,
-          line: lineIdx + 1,
-          raw: match[0],
-          isEmbed,
-          isBroken: false, // will resolve against vault
-        });
+        if (!targetBase && heading) continue;
+
+        if (targetBase) {
+          outgoingLinks.push({
+            target: targetBase,
+            normalizedTarget: targetBase.toLowerCase(),
+            alias,
+            heading,
+            line: lineIdx + 1,
+            raw: match[0],
+            isEmbed,
+            isBroken: false,
+          });
+        }
       }
     }
 
     // 2. Markdown Links [title](path)
-    const mdRegex = new RegExp(MARKDOWN_LINK_REGEX);
-    while ((match = mdRegex.exec(lineText)) !== null) {
-      const isEmbed = match[1] === '!';
-      const rawTarget = match[3];
+    if (lineText.includes('](')) {
+      MARKDOWN_LINK_GLOBAL_REGEX.lastIndex = 0;
+      let match;
+      while ((match = MARKDOWN_LINK_GLOBAL_REGEX.exec(lineText)) !== null) {
+        const isEmbed = match[1] === '!';
+        const rawTarget = match[3];
 
-      // Exclude external web links (http, https, mailto, etc.)
-      if (/^https?:\/\//i.test(rawTarget) || /^mailto:/i.test(rawTarget)) {
-        continue;
-      }
+        if (!rawTarget || /^https?:\/\//i.test(rawTarget) || /^mailto:/i.test(rawTarget)) {
+          continue;
+        }
 
-      const { targetBase, heading } = normalizeTargetName(rawTarget);
-      if (targetBase) {
-        outgoingLinks.push({
-          target: targetBase,
-          normalizedTarget: targetBase.toLowerCase(),
-          alias: match[2],
-          heading,
-          line: lineIdx + 1,
-          raw: match[0],
-          isEmbed,
-          isBroken: false,
-        });
+        const { targetBase, heading } = normalizeTargetName(rawTarget);
+        if (targetBase) {
+          outgoingLinks.push({
+            target: targetBase,
+            normalizedTarget: targetBase.toLowerCase(),
+            alias: match[2],
+            heading,
+            line: lineIdx + 1,
+            raw: match[0],
+            isEmbed,
+            isBroken: false,
+          });
+        }
       }
     }
-  });
+  }
 
-  // Word count (ignoring frontmatter)
-  const cleanBodyForWords = bodyContent.replace(/[#*`_~[\]()]/g, ' ');
-  const words = cleanBodyForWords.trim().split(/\s+/).filter(Boolean);
+  // Fast word count calculation
+  let wordCount = 0;
+  if (bodyContent) {
+    const cleanWords = bodyContent.replace(/[#*`_~[\]()]/g, ' ').trim();
+    if (cleanWords) {
+      wordCount = cleanWords.split(/\s+/).length;
+    }
+  }
 
   return {
     id: path,
     name,
     baseName,
     path,
-    content: file.content,
+    content,
     folder,
     extension: ext,
     isAttachment: false,
-    size: file.size || file.content.length,
-    wordCount: words.length,
+    size: file.size || content.length,
+    wordCount,
     frontmatter,
     rawFrontmatter,
     hasFrontmatterError,
@@ -245,25 +253,54 @@ export function parseMarkdownFile(file: RawFileEntry): Omit<VaultFile, 'backlink
   };
 }
 
-/**
- * Calculates Levenshtein distance for fuzzy search suggestions
- */
-function levenshteinDistance(a: string, b: string): number {
-  const matrix = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
-  for (let i = 0; i <= a.length; i++) matrix[i][0] = i;
-  for (let j = 0; j <= b.length; j++) matrix[0][j] = j;
+// Preallocated buffers for bounded Levenshtein
+const LEV_ROW_A = new Int32Array(128);
+const LEV_ROW_B = new Int32Array(128);
 
-  for (let i = 1; i <= a.length; i++) {
-    for (let j = 1; j <= b.length; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      matrix[i][j] = Math.min(
-        matrix[i - 1][j] + 1,
-        matrix[i][j - 1] + 1,
-        matrix[i - 1][j - 1] + cost
+/**
+ * High-speed bounded Levenshtein distance calculation
+ */
+function boundedLevenshtein(a: string, b: string, maxDist = 3): number {
+  if (a === b) return 0;
+  if (!a) return b.length;
+  if (!b) return a.length;
+  const aLen = a.length;
+  const bLen = b.length;
+  const lenDiff = Math.abs(aLen - bLen);
+  if (lenDiff > maxDist) return maxDist + 1;
+  if (bLen >= 127 || aLen >= 127) return maxDist + 1;
+
+  for (let j = 0; j <= bLen; j++) LEV_ROW_A[j] = j;
+
+  for (let i = 1; i <= aLen; i++) {
+    LEV_ROW_B[0] = i;
+    const aChar = a.charCodeAt(i - 1);
+    let minRowVal = i;
+
+    for (let j = 1; j <= bLen; j++) {
+      const cost = aChar === b.charCodeAt(j - 1) ? 0 : 1;
+      const val = Math.min(
+        LEV_ROW_A[j] + 1,
+        LEV_ROW_B[j - 1] + 1,
+        LEV_ROW_A[j - 1] + cost
       );
+      LEV_ROW_B[j] = val;
+      if (val < minRowVal) minRowVal = val;
+    }
+
+    if (minRowVal > maxDist) {
+      return maxDist + 1;
+    }
+
+    for (let j = 0; j <= bLen; j++) {
+      LEV_ROW_A[j] = LEV_ROW_B[j];
     }
   }
-  return matrix[a.length][b.length];
+  return LEV_ROW_A[bLen];
+}
+
+function levenshteinDistance(a: string, b: string): number {
+  return boundedLevenshtein(a, b, 3);
 }
 
 /**
@@ -401,6 +438,7 @@ export function analyzeVault(rawFiles: RawFileEntry[], vaultName: string = 'My O
 
   const brokenLinkItems: BrokenLinkItem[] = [];
   const incomingEmbedsSet = new Set<string>();
+  const fuzzyMatchCache = new Map<string, string | undefined>();
 
   // Step 2: Resolve all outgoing links & register backlinks
   parsedFiles.forEach((file) => {
@@ -429,17 +467,49 @@ export function analyzeVault(rawFiles: RawFileEntry[], vaultName: string = 'My O
         link.isBroken = true;
         file.unresolvedLinks.push(link.target);
 
-        // Find closest fuzzy match suggestion
-        let bestMatch: string | undefined;
-        let lowestDist = Infinity;
+        // Find closest fuzzy match suggestion with memoization
+        const targetClean = (link.target || '').toLowerCase().trim();
+        const cacheKey = `${link.isEmbed ? 'embed:' : 'note:'}${targetClean}`;
 
-        const candidateList = link.isEmbed ? allAttachmentsList : allNotesList;
-        for (const candidate of candidateList) {
-          const dist = levenshteinDistance(link.target.toLowerCase(), candidate.baseName.toLowerCase());
-          if (dist < lowestDist && dist <= 3) {
-            lowestDist = dist;
-            bestMatch = candidate.baseName;
+        let bestMatch: string | undefined;
+        if (fuzzyMatchCache.has(cacheKey)) {
+          bestMatch = fuzzyMatchCache.get(cacheKey);
+        } else if (targetClean) {
+          let lowestDist = 4; // looking for <= 3
+          const candidateList = link.isEmbed ? allAttachmentsList : allNotesList;
+          const targetLen = targetClean.length;
+
+          // Limit candidate evaluation to top matches
+          let evaluated = 0;
+          for (let cIdx = 0; cIdx < candidateList.length; cIdx++) {
+            if (evaluated > 40) break;
+            const candidate = candidateList[cIdx];
+            if (!candidate || !candidate.baseName) continue;
+            const candName = candidate.baseName.toLowerCase();
+            const candLen = candName.length;
+            if (Math.abs(candLen - targetLen) > 3) continue;
+
+            evaluated++;
+
+            // Quick substring or prefix match
+            if (targetLen > 3 && (candName.includes(targetClean) || targetClean.includes(candName))) {
+              bestMatch = candidate.baseName;
+              lowestDist = 1;
+              break;
+            }
+
+            const dist = boundedLevenshtein(targetClean, candName, lowestDist - 1);
+            if (dist < lowestDist) {
+              lowestDist = dist;
+              bestMatch = candidate.baseName;
+              if (dist <= 1) break;
+            }
           }
+          fuzzyMatchCache.set(cacheKey, bestMatch);
+        }
+
+        if (bestMatch) {
+          link.suggestedFix = bestMatch;
         }
 
         brokenLinkItems.push({
@@ -460,6 +530,7 @@ export function analyzeVault(rawFiles: RawFileEntry[], vaultName: string = 'My O
   const frontmatterIssueItems: FrontmatterIssueItem[] = [];
   const unusedAttachmentItems: UnusedAttachmentItem[] = [];
   const tagFrequency: Record<string, number> = {};
+  const tagToNotesMap = new Map<string, string[]>();
   const folderDistribution: Record<string, number> = {};
   let untaggedNotesCount = 0;
   let totalWords = 0;
@@ -486,12 +557,18 @@ export function analyzeVault(rawFiles: RawFileEntry[], vaultName: string = 'My O
     totalWords += file.wordCount;
     totalLinks += file.outgoingLinks.length;
 
-    // Tags frequency
+    // Tags frequency & note index
     if (file.tags.length === 0) {
       untaggedNotesCount++;
     } else {
       file.tags.forEach((tag) => {
         tagFrequency[tag] = (tagFrequency[tag] || 0) + 1;
+        let noteList = tagToNotesMap.get(tag);
+        if (!noteList) {
+          noteList = [];
+          tagToNotesMap.set(tag, noteList);
+        }
+        noteList.push(file.baseName);
       });
     }
 
@@ -554,7 +631,7 @@ export function analyzeVault(rawFiles: RawFileEntry[], vaultName: string = 'My O
   });
 
   Object.entries(tagFrequency).forEach(([tag, count]) => {
-    const notesWithTag = allNotesList.filter((n) => n.tags.includes(tag)).map((n) => n.baseName);
+    const notesWithTag = tagToNotesMap.get(tag) || [];
     const lower = tag.toLowerCase();
     const casingVariants = tagCasingMap.get(lower)?.filter((v) => v !== tag) || [];
 
@@ -574,11 +651,16 @@ export function analyzeVault(rawFiles: RawFileEntry[], vaultName: string = 'My O
   // A. Exact content matches
   const contentMap = new Map<string, VaultFile[]>();
   allNotesList.forEach((note) => {
-    // Strip YAML frontmatter
-    const body = note.content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trim();
-    // Normalize extra line spaces
-    const normalized = body.replace(/\r\n/g, '\n').replace(/\s+/g, ' ').trim();
-    if (normalized.length >= 15) {
+    let body = note.content || '';
+    if (body.startsWith('---')) {
+      const endFm = body.indexOf('\n---', 3);
+      if (endFm !== -1) {
+        body = body.slice(endFm + 4);
+      }
+    }
+    const trimmed = body.trim();
+    if (trimmed.length >= 15) {
+      const normalized = trimmed.replace(/\r\n/g, '\n').trim();
       if (!contentMap.has(normalized)) {
         contentMap.set(normalized, []);
       }
@@ -590,20 +672,23 @@ export function analyzeVault(rawFiles: RawFileEntry[], vaultName: string = 'My O
   let groupCounter = 0;
 
   contentMap.forEach((groupFiles) => {
-    if (groupFiles.length >= 2) {
+    if (groupFiles && groupFiles.length >= 2) {
       groupCounter++;
-      groupFiles.forEach((f) => exactContentFilesSet.add(f.id));
-      const sizes = groupFiles.map((f) => f.size);
-      const minSize = Math.min(...sizes);
-      const maxSize = Math.max(...sizes);
+      groupFiles.forEach((f) => {
+        if (f && f.id) exactContentFilesSet.add(f.id);
+      });
+      const sizes = groupFiles.map((f) => f?.size || 0);
+      const minSize = sizes.length > 0 ? Math.min(...sizes) : 0;
+      const maxSize = sizes.length > 0 ? Math.max(...sizes) : 0;
+      const baseNote = groupFiles[0] || { baseName: 'Note', wordCount: 0 };
       duplicateGroups.push({
-        id: `exact-${groupCounter}-${groupFiles[0].baseName.toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
+        id: `exact-${groupCounter}-${(baseNote.baseName || 'note').toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
         type: 'exact-content',
-        title: `Exact Content: "${groupFiles[0].baseName}"`,
+        title: `Exact Content: "${baseNote.baseName || 'Note'}"`,
         files: groupFiles,
-        matchDetail: `Identical body content across ${groupFiles.length} notes (~${groupFiles[0].wordCount} words)`,
-        sizeDifference: maxSize - minSize,
-        wordCount: groupFiles[0].wordCount,
+        matchDetail: `Identical body content across ${groupFiles.length} notes (~${baseNote.wordCount || 0} words)`,
+        sizeDifference: Math.max(0, maxSize - minSize),
+        wordCount: baseNote.wordCount || 0,
       });
     }
   });
@@ -611,6 +696,7 @@ export function analyzeVault(rawFiles: RawFileEntry[], vaultName: string = 'My O
   // B. Same base name collisions (cross-folder name duplicates)
   const nameMap = new Map<string, VaultFile[]>();
   allNotesList.forEach((note) => {
+    if (!note || !note.baseName) return;
     const key = note.baseName.toLowerCase().trim();
     if (!nameMap.has(key)) {
       nameMap.set(key, []);
@@ -619,22 +705,25 @@ export function analyzeVault(rawFiles: RawFileEntry[], vaultName: string = 'My O
   });
 
   nameMap.forEach((groupFiles, key) => {
-    if (groupFiles.length >= 2) {
+    if (groupFiles && groupFiles.length >= 2) {
       // Check if all of them are already in exact content group
-      const allExact = groupFiles.every((f) => exactContentFilesSet.has(f.id));
+      const allExact = groupFiles.every((f) => f && exactContentFilesSet.has(f.id));
       if (!allExact) {
         groupCounter++;
-        const sizes = groupFiles.map((f) => f.size);
-        const minSize = Math.min(...sizes);
-        const maxSize = Math.max(...sizes);
+        const sizes = groupFiles.map((f) => f?.size || 0);
+        const minSize = sizes.length > 0 ? Math.min(...sizes) : 0;
+        const maxSize = sizes.length > 0 ? Math.max(...sizes) : 0;
+        const baseNote = groupFiles[0] || { baseName: 'Note' };
+        const wordCounts = groupFiles.map((f) => f?.wordCount || 0);
+        const maxWords = wordCounts.length > 0 ? Math.max(...wordCounts) : 0;
         duplicateGroups.push({
           id: `name-${groupCounter}-${key.replace(/[^a-z0-9]/g, '-')}`,
           type: 'same-name',
-          title: `Name Collision: "${groupFiles[0].baseName}"`,
+          title: `Name Collision: "${baseNote.baseName || 'Note'}"`,
           files: groupFiles,
-          matchDetail: `Same note title in ${groupFiles.length} separate folders (${groupFiles.map((f) => f.folder === '/' ? 'Root' : f.folder).join(', ')})`,
-          sizeDifference: maxSize - minSize,
-          wordCount: Math.max(...groupFiles.map((f) => f.wordCount)),
+          matchDetail: `Same note title in ${groupFiles.length} separate folders (${groupFiles.map((f) => (f && f.folder === '/' ? 'Root' : (f?.folder || 'Root'))).join(', ')})`,
+          sizeDifference: Math.max(0, maxSize - minSize),
+          wordCount: maxWords,
         });
       }
     }

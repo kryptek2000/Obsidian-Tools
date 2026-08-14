@@ -8,6 +8,7 @@ export interface OutgoingLink {
   isEmbed: boolean; // ![[note]] or ![[image.png]]
   isBroken: boolean;
   resolvedPath?: string;
+  suggestedFix?: string;
 }
 
 export interface Backlink {

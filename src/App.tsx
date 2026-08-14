@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useTransition } from 'react';
 import confetti from 'canvas-confetti';
 import { RawFileEntry, analyzeVault } from './utils/vaultParser';
 import { VaultFile, VaultAuditSummary, ActiveTab } from './types';
@@ -40,13 +40,19 @@ export default function App() {
   const [isObsidianModalOpen, setIsObsidianModalOpen] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [toastMessage, setToastMessage] = useState<{ title: string; desc?: string } | null>(null);
+  const [, startTransition] = useTransition();
 
   const showToast = (title: string, desc?: string) => {
     setToastMessage({ title, desc });
-    setTimeout(() => {
-      setToastMessage((prev) => (prev?.title === title ? null : prev));
-    }, 4000);
   };
+
+  React.useEffect(() => {
+    if (!toastMessage) return;
+    const timer = setTimeout(() => {
+      setToastMessage(null);
+    }, 4000);
+    return () => clearTimeout(timer);
+  }, [toastMessage]);
 
   // Re-run analysis whenever raw files change
   const summary = useMemo(() => {
@@ -61,10 +67,14 @@ export default function App() {
   // Keep selectedNote in sync if files are updated or removed
   React.useEffect(() => {
     if (selectedNote) {
-      const refreshed = parsedFiles.find((f) => f.id === selectedNote.id);
+      const refreshed = parsedFiles.find((f) => f && f.id === selectedNote.id);
       if (!refreshed) {
         setSelectedNote(null);
-      } else if (refreshed !== selectedNote) {
+      } else if (
+        refreshed.content !== selectedNote.content ||
+        refreshed.name !== selectedNote.name ||
+        (refreshed.tags?.length || 0) !== (selectedNote.tags?.length || 0)
+      ) {
         setSelectedNote(refreshed);
       }
     }
@@ -414,7 +424,12 @@ This note was automatically initialized to provide a central node for incoming r
   };
 
   const handleUpdateRawFiles = (updated: RawFileEntry[], message?: string) => {
-    setRawFiles(updated);
+    if (selectedNote && !updated.some((f) => f && f.path === selectedNote.id)) {
+      setSelectedNote(null);
+    }
+    startTransition(() => {
+      setRawFiles(updated);
+    });
     if (message) {
       showToast('Vault Updated', message);
     }

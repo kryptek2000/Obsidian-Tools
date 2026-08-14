@@ -115,12 +115,13 @@ export const NoteInspectorModal: React.FC<NoteInspectorModalProps> = ({
       const alias = rawTarget.includes('|') ? rawTarget.split('|')[1].trim() : targetBase;
 
       // Check if target exists
-      const targetLower = targetBase.toLowerCase();
-      const targetFile = allFiles.find(
+      const targetLower = (targetBase || '').toLowerCase();
+      const targetFile = (allFiles || []).find(
         (f) =>
-          f.baseName.toLowerCase() === targetLower ||
-          f.id.toLowerCase() === targetLower ||
-          f.name.toLowerCase() === targetLower
+          f &&
+          ((f.baseName && f.baseName.toLowerCase() === targetLower) ||
+            (f.id && f.id.toLowerCase() === targetLower) ||
+            (f.name && f.name.toLowerCase() === targetLower))
       );
 
       const isBroken = !targetFile;
@@ -210,7 +211,7 @@ export const NoteInspectorModal: React.FC<NoteInspectorModalProps> = ({
           {/* Left / Main: Note Reader or Editor */}
           <div className="lg:col-span-2 p-6 sm:p-8 overflow-y-auto border-b lg:border-b-0 lg:border-r border-[#E5E5E1] space-y-4 bg-[#FCFCF9]">
             {/* Metadata Tags Pill Bar */}
-            {note.tags.length > 0 && (
+            {note.tags && note.tags.length > 0 && (
               <div className="flex flex-wrap gap-1.5 pb-3 border-b border-[#E5E5E1]">
                 {note.tags.map((tag) => (
                   <span
@@ -232,7 +233,7 @@ export const NoteInspectorModal: React.FC<NoteInspectorModalProps> = ({
               />
             ) : (
               <div className="max-w-none">
-                {renderInteractiveMarkdown(note.content)}
+                {renderInteractiveMarkdown(note.content || '')}
               </div>
             )}
           </div>
@@ -250,7 +251,7 @@ export const NoteInspectorModal: React.FC<NoteInspectorModalProps> = ({
                     : 'text-[#5A5A57] hover:text-[#1A1A1A]'
                 }`}
               >
-                Backlinks ({note.backlinks.length})
+                Backlinks ({(note.backlinks || []).length})
               </button>
               <button
                 type="button"
@@ -261,7 +262,7 @@ export const NoteInspectorModal: React.FC<NoteInspectorModalProps> = ({
                     : 'text-[#5A5A57] hover:text-[#1A1A1A]'
                 }`}
               >
-                Outgoing ({note.outgoingLinks.length})
+                Outgoing ({(note.outgoingLinks || []).length})
               </button>
               <button
                 type="button"
@@ -281,9 +282,9 @@ export const NoteInspectorModal: React.FC<NoteInspectorModalProps> = ({
               {activeSideTab === 'backlinks' && (
                 <div>
                   <div className="text-[10px] font-semibold text-[#8C8C88] mb-2 uppercase tracking-wider">
-                    Linked Mentions ({note.backlinks.length})
+                    Linked Mentions ({(note.backlinks || []).length})
                   </div>
-                  {note.backlinks.length === 0 ? (
+                  {(!note.backlinks || note.backlinks.length === 0) ? (
                     <div className="p-4 rounded-xl bg-[#FFFFFF] border border-[#E5E5E1] text-center text-xs text-[#8C8C88]">
                       No incoming backlinks. This note is unreferenced by other notes.
                     </div>
@@ -312,9 +313,9 @@ export const NoteInspectorModal: React.FC<NoteInspectorModalProps> = ({
               {activeSideTab === 'outgoing' && (
                 <div>
                   <div className="text-[10px] font-semibold text-[#8C8C88] mb-2 uppercase tracking-wider">
-                    Outgoing Links ({note.outgoingLinks.length})
+                    Outgoing Links ({(note.outgoingLinks || []).length})
                   </div>
-                  {note.outgoingLinks.length === 0 ? (
+                  {(!note.outgoingLinks || note.outgoingLinks.length === 0) ? (
                     <div className="p-4 rounded-xl bg-[#FFFFFF] border border-[#E5E5E1] text-center text-xs text-[#8C8C88]">
                       Zero outgoing links. This is a sink note.
                     </div>

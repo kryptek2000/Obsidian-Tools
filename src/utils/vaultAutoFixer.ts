@@ -55,22 +55,29 @@ export function detectLineEnding(content: string): '\r\n' | '\n' {
 export function replaceLinkInContent(content: string, oldTarget: string, newTarget: string): string {
   if (!content || typeof content !== 'string') return content || '';
   if (!oldTarget || typeof oldTarget !== 'string' || !newTarget || typeof newTarget !== 'string') return content;
-  if (oldTarget.trim() === newTarget.trim()) return content;
+  const trimmedOld = oldTarget.trim();
+  const trimmedNew = newTarget.trim();
+  if (trimmedOld === trimmedNew) return content;
+
+  // Ultra-fast substring presence check before regex parsing
+  if (!content.includes(trimmedOld)) {
+    return content;
+  }
 
   try {
-    const escapedOld = escapeRegex(oldTarget.trim());
+    const escapedOld = escapeRegex(trimmedOld);
 
     // 1. Wikilinks: [[oldTarget]] or [[oldTarget|Alias]] or [[oldTarget#Heading]] or ![[oldTarget]]
     const wikiPattern = new RegExp(`(!?\\[\\[)${escapedOld}(#[^\\]|]+)?(\\|[^\\]]+)?(\\]\\])`, 'g');
     let updated = content.replace(wikiPattern, (_match, prefix, heading, alias, closing) => {
-      return `${prefix}${newTarget}${heading || ''}${alias || ''}${closing}`;
+      return `${prefix}${trimmedNew}${heading || ''}${alias || ''}${closing}`;
     });
 
     // 2. Markdown links: [alias](oldTarget.md) or [alias](oldTarget) or ![alt](oldTarget.png)
     const mdPattern = new RegExp(`(!?\\[[^\\]]*\\]\\()${escapedOld}(\\.md)?(#[^)]+)?(\\))`, 'g');
     updated = updated.replace(mdPattern, (_match, prefix, mdExt, heading, closing) => {
       const ext = mdExt ? '.md' : '';
-      return `${prefix}${newTarget}${ext}${heading || ''}${closing}`;
+      return `${prefix}${trimmedNew}${ext}${heading || ''}${closing}`;
     });
 
     return updated;
@@ -561,6 +568,112 @@ export async function exportVaultAsZip(
 }
 
 /**
+ * Safely extracts all tags from a note's frontmatter and body.
+ */
+export function extractTagsFromContent(content: string): Set<string> {
+  const tags = new Set<string>();
+  if (!content || typeof content !== 'string') return tags;
+
+  try {
+    // 1. Inline tags (#tag)
+    const inlineMatches = content.matchAll(/(?:^|[\s(\[{])#([a-zA-Z0-9_\-\/]+)/g);
+    for (const match of inlineMatches) {
+      const t = match[1];
+      if (t && !/^\d+$/.test(t)) {
+        tags.add(t);
+      }
+    }
+
+    // 2. YAML frontmatter tags
+    const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+    if (fmMatch && fmMatch[1]) {
+      const fmText = fmMatch[1];
+      // Inline tags: [a, b]
+      const inlineFmMatch = fmText.match(/tags?:\s*\[(.*?)\]/i);
+      if (inlineFmMatch) {
+        inlineFmMatch[1].split(',').forEach((raw) => {
+          const clean = raw.trim().replace(/^['"#]+|['"]+$/g, '');
+          if (clean && !/^\d+$/.test(clean)) tags.add(clean);
+        });
+      }
+      // Multiline list tags: - tag
+      const listMatches = fmText.matchAll(/^\s*-\s+["'#]?([a-zA-Z0-9_\-\/]+)["']?/gm);
+      for (const lm of listMatches) {
+        const clean = lm[1]?.trim();
+        if (clean && !/^\d+$/.test(clean)) tags.add(clean);
+      }
+    }
+  } catch (err) {
+    console.error('Error extracting tags from note content:', err);
+  }
+
+  return tags;
+}
+
+/**
+ * Safely merges a set of tags into a markdown file's frontmatter without corrupting YAML formatting.
+ */
+export function mergeTagsIntoNoteContent(
+  content: string,
+  tagsToAdd: Set<string> | string[],
+  noteTitle: string = 'Note'
+): string {
+  const tagsArray = Array.from(tagsToAdd).filter(Boolean);
+  if (!tagsArray.length) return content || '';
+  if (!content) content = '';
+
+  const le = detectLineEnding(content);
+  const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+
+  if (!fmMatch) {
+    // Add new frontmatter header with these tags
+    const dateStr = new Date().toISOString().split('T')[0];
+    return `---${le}title: ${noteTitle}${le}date: ${dateStr}${le}tags:${le}${tagsArray
+      .map((t) => `  - ${t}`)
+      .join(le)}${le}status: active${le}---${le}${le}${content}`;
+  }
+
+  const rawFm = fmMatch[1];
+  const fullHeader = fmMatch[0];
+  const body = content.slice(fullHeader.length);
+
+  const existingTags = extractTagsFromContent(fullHeader);
+  const newUniqueTags = tagsArray.filter((t) => !existingTags.has(t));
+  if (newUniqueTags.length === 0) return content; // nothing new to add
+
+  const fmLines = rawFm.split(/\r?\n/);
+  const tagsLineIndex = fmLines.findIndex((l) => /^tags?\s*:/i.test(l));
+
+  if (tagsLineIndex === -1) {
+    // tags property doesn't exist yet in frontmatter, insert at end of frontmatter
+    const updatedFmLines = [...fmLines, `tags:`, ...newUniqueTags.map((t) => `  - ${t}`)];
+    return `---${le}${updatedFmLines.join(le)}${le}---${le}${body}`;
+  }
+
+  const targetTagLine = fmLines[tagsLineIndex];
+  if (targetTagLine.includes('[')) {
+    // inline array tags: [a, b]
+    const currentBracketContent = targetTagLine.replace(/^tags?\s*:\s*\[/i, '').replace(/\]\s*$/, '');
+    const currentItems = currentBracketContent
+      .split(',')
+      .map((t) => t.trim().replace(/^['"#]+|['"]+$/g, ''))
+      .filter(Boolean);
+    const combined = Array.from(new Set([...currentItems, ...newUniqueTags]));
+    fmLines[tagsLineIndex] = `tags: [${combined.join(', ')}]`;
+    return `---${le}${fmLines.join(le)}${le}---${le}${body}`;
+  } else {
+    // multiline list tags
+    let insertIndex = tagsLineIndex + 1;
+    while (insertIndex < fmLines.length && /^\s*-\s+/.test(fmLines[insertIndex])) {
+      insertIndex++;
+    }
+    const newItemsToInsert = newUniqueTags.map((t) => `  - ${t}`);
+    fmLines.splice(insertIndex, 0, ...newItemsToInsert);
+    return `---${le}${fmLines.join(le)}${le}---${le}${body}`;
+  }
+}
+
+/**
  * Deletes a duplicate file from rawFiles and optionally redirects backlinks pointing to it
  */
 export function deleteDuplicateNote(
@@ -622,58 +735,12 @@ export function mergeDuplicateNotes(
   let updatedPrimaryContent = primaryEntry.content || '';
   const primaryLineEnding = detectLineEnding(updatedPrimaryContent);
 
-  // 1. Merge tags
+  // 1. Merge tags safely
   if (options.mergeTags && duplicateEntry.content) {
-    const dupTagsMatch = duplicateEntry.content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-    const dupInlineTags = Array.from(duplicateEntry.content.matchAll(/(?:^|[\s(\[{])#([a-zA-Z0-9_\-\/]+)/g)).map((m) => m[1]);
-    const extractedTags = new Set<string>(dupInlineTags);
-
-    if (dupTagsMatch) {
-      const fmText = dupTagsMatch[1];
-      const fmTagsMatch = fmText.match(/tags:\s*\[(.*?)\]/);
-      if (fmTagsMatch) {
-        fmTagsMatch[1].split(',').forEach((t) => {
-          const clean = t.trim().replace(/^['"#]+|['"]+$/g, '');
-          if (clean) extractedTags.add(clean);
-        });
-      }
-      const listMatches = fmText.matchAll(/^\s*-\s+["'#]?([a-zA-Z0-9_\-\/]+)["']?/gm);
-      for (const lm of listMatches) {
-        extractedTags.add(lm[1]);
-      }
-    }
-
-    if (extractedTags.size > 0) {
-      const primaryFmMatch = updatedPrimaryContent.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-      if (primaryFmMatch) {
-        const lines = updatedPrimaryContent.split(primaryLineEnding);
-        const fmEndIndex = lines.slice(1).findIndex((l) => l.trim() === '---') + 1;
-        let hasTagsKey = false;
-        for (let i = 1; i < fmEndIndex; i++) {
-          if (/^tags:\s*/i.test(lines[i])) {
-            hasTagsKey = true;
-            const existingTags = lines[i].replace(/^tags:\s*/i, '');
-            if (existingTags.startsWith('[')) {
-              const currentTagList = existingTags
-                .replace(/[\[\]]/g, '')
-                .split(',')
-                .map((t) => t.trim().replace(/^['"#]+|['"]+$/g, ''));
-              extractedTags.forEach((t) => {
-                if (!currentTagList.includes(t)) currentTagList.push(t);
-              });
-              lines[i] = `tags: [${currentTagList.filter(Boolean).join(', ')}]`;
-            } else {
-              const newTagsToInsert = Array.from(extractedTags).map((t) => `  - ${t}`);
-              lines.splice(i + 1, 0, ...newTagsToInsert);
-            }
-            break;
-          }
-        }
-        if (!hasTagsKey) {
-          lines.splice(1, 0, `tags: [${Array.from(extractedTags).join(', ')}]`);
-        }
-        updatedPrimaryContent = lines.join(primaryLineEnding);
-      }
+    const dupTags = extractTagsFromContent(duplicateEntry.content);
+    if (dupTags.size > 0) {
+      const primaryBase = primaryEntry.name ? primaryEntry.name.replace(/\.md$/i, '') : 'Primary Note';
+      updatedPrimaryContent = mergeTagsIntoNoteContent(updatedPrimaryContent, dupTags, primaryBase);
     }
   }
 
@@ -682,7 +749,7 @@ export function mergeDuplicateNotes(
     const primaryBody = (primaryEntry.content || '').replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trim();
     const dupBody = duplicateEntry.content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trim();
 
-    if (primaryBody !== dupBody && dupBody.length > 0) {
+    if (primaryBody !== dupBody && dupBody.length > 0 && !primaryBody.includes(dupBody)) {
       const dupBaseName = (duplicateEntry.name || 'Duplicate Note').replace(/\.md$/i, '');
       const appendBlock = `${primaryLineEnding}${primaryLineEnding}---${primaryLineEnding}## 📑 Merged Content from \`${dupBaseName}\`${primaryLineEnding}${primaryLineEnding}${dupBody}${primaryLineEnding}`;
       updatedPrimaryContent += appendBlock;
@@ -691,6 +758,9 @@ export function mergeDuplicateNotes(
 
   const oldBaseName = (duplicateEntry.name || '').replace(/\.md$/i, '');
   const newBaseName = (primaryEntry.name || '').replace(/\.md$/i, '');
+
+  const oldPathNoExt = duplicateEntry.path.replace(/\.md$/i, '');
+  const newPathNoExt = primaryEntry.path.replace(/\.md$/i, '');
 
   return rawFiles
     .filter((f) => f && f.path !== duplicatePath)
@@ -704,8 +774,14 @@ export function mergeDuplicateNotes(
           lastModified: Date.now(),
         };
       }
-      if (options.redirectLinks && !file.isBinary && !file.isConfigOrPlugin && oldBaseName && newBaseName && oldBaseName !== newBaseName) {
-        const updated = replaceLinkInContent(file.content, oldBaseName, newBaseName);
+      if (options.redirectLinks && !file.isBinary && !file.isConfigOrPlugin && file.content) {
+        let updated = file.content;
+        if (oldBaseName && newBaseName && oldBaseName !== newBaseName) {
+          updated = replaceLinkInContent(updated, oldBaseName, newBaseName);
+        }
+        if (oldPathNoExt && newPathNoExt && oldPathNoExt !== newPathNoExt && oldPathNoExt !== oldBaseName) {
+          updated = replaceLinkInContent(updated, oldPathNoExt, newPathNoExt);
+        }
         if (updated !== file.content) {
           return {
             ...file,
@@ -912,6 +988,9 @@ export async function batchResolveExactDuplicatesAsync(
     percentage: 100,
   });
 
+  // Yield to allow UI to render the completion state
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
   return { updatedRawFiles, resolvedCount: pathsToDelete.size };
 }
 
@@ -927,7 +1006,7 @@ export async function batchMergeDuplicateGroupsAsync(
     redirectLinks: boolean;
   },
   onProgress?: BatchProgressCallback,
-  batchChunkSize: number = 4
+  batchChunkSize: number = 8
 ): Promise<{ updatedRawFiles: RawFileEntry[]; resolvedCount: number; mergedGroupCount: number }> {
   if (!rawFiles || rawFiles.length === 0 || !groupsToMerge || groupsToMerge.length === 0) {
     onProgress?.({
@@ -940,65 +1019,180 @@ export async function batchMergeDuplicateGroupsAsync(
     return { updatedRawFiles: rawFiles || [], resolvedCount: 0, mergedGroupCount: 0 };
   }
 
-  let currentRawFiles = [...rawFiles];
+  // Fast in-memory index
+  const fileMap = new Map<string, RawFileEntry>();
+  rawFiles.forEach((f) => {
+    if (f && f.path) {
+      fileMap.set(f.path, { ...f });
+    }
+  });
+
+  const pathsToDelete = new Set<string>();
+  const linkRedirectMap = new Map<string, string>(); // oldTarget -> newTarget
   let totalResolvedFiles = 0;
   let mergedGroupCount = 0;
   const totalGroups = groupsToMerge.length;
 
+  // Step 1: Merge content and collect deletions in non-blocking batches
   for (let i = 0; i < totalGroups; i += batchChunkSize) {
     const chunk = groupsToMerge.slice(i, i + batchChunkSize);
 
     for (const group of chunk) {
       if (!group || !group.files || group.files.length < 2) continue;
 
-      // Primary is first file
-      const primaryFile = group.files[0];
-      const dupFiles = group.files.slice(1);
+      // Filter to files currently in fileMap and not marked for deletion
+      const availableFiles = group.files.filter((f) => f && f.path && fileMap.has(f.path) && !pathsToDelete.has(f.path));
+      if (availableFiles.length < 2) continue;
 
-      for (const dup of dupFiles) {
-        if (!dup || !dup.path || dup.path === primaryFile.path) continue;
+      // Primary file is the first available file
+      const primaryFileMeta = availableFiles[0];
+      const primaryEntry = fileMap.get(primaryFileMeta.path);
+      if (!primaryEntry) continue;
 
-        // Check if both exist
-        const pExists = currentRawFiles.some((f) => f && f.path === primaryFile.path);
-        const dExists = currentRawFiles.some((f) => f && f.path === dup.path);
-        if (!pExists || !dExists) continue;
+      const dupFilesMeta = availableFiles.slice(1);
+      let updatedPrimaryContent = primaryEntry.content || '';
+      const primaryLineEnding = detectLineEnding(updatedPrimaryContent);
+      const primaryBaseName = (primaryFileMeta.name || primaryEntry.name || '').replace(/\.md$/i, '');
+      const primaryPathNoExt = primaryFileMeta.path.replace(/\.md$/i, '');
 
-        currentRawFiles = mergeDuplicateNotes(currentRawFiles, primaryFile.path, dup.path, {
-          mergeTags: options.mergeTags,
-          appendContent: options.appendContent && group.type !== 'exact-content',
-          redirectLinks: options.redirectLinks,
-        });
+      for (const dupMeta of dupFilesMeta) {
+        if (!dupMeta || !dupMeta.path || dupMeta.path === primaryFileMeta.path || pathsToDelete.has(dupMeta.path)) {
+          continue;
+        }
 
+        const dupEntry = fileMap.get(dupMeta.path);
+        if (!dupEntry) continue;
+
+        // 1. Merge tags
+        if (options.mergeTags && dupEntry.content) {
+          const dupTags = extractTagsFromContent(dupEntry.content);
+          if (dupTags.size > 0) {
+            updatedPrimaryContent = mergeTagsIntoNoteContent(updatedPrimaryContent, dupTags, primaryBaseName);
+          }
+        }
+
+        // 2. Append content if bodies differ and not exact content match
+        if (options.appendContent && group.type !== 'exact-content' && dupEntry.content) {
+          const primaryBody = updatedPrimaryContent.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trim();
+          const dupBody = dupEntry.content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trim();
+
+          if (primaryBody !== dupBody && dupBody.length > 0 && !primaryBody.includes(dupBody)) {
+            const dupBaseName = (dupMeta.name || dupEntry.name || 'Duplicate Note').replace(/\.md$/i, '');
+            const appendBlock = `${primaryLineEnding}${primaryLineEnding}---${primaryLineEnding}## 📑 Merged Content from \`${dupBaseName}\`${primaryLineEnding}${primaryLineEnding}${dupBody}${primaryLineEnding}`;
+            updatedPrimaryContent += appendBlock;
+          }
+        }
+
+        // 3. Link redirect mapping
+        const dupBaseName = (dupMeta.name || dupEntry.name || '').replace(/\.md$/i, '');
+        const dupPathNoExt = dupMeta.path.replace(/\.md$/i, '');
+
+        if (dupBaseName && primaryBaseName && dupBaseName !== primaryBaseName) {
+          linkRedirectMap.set(dupBaseName, primaryBaseName);
+        }
+        if (dupPathNoExt && primaryPathNoExt && dupPathNoExt !== primaryPathNoExt && dupPathNoExt !== dupBaseName) {
+          linkRedirectMap.set(dupPathNoExt, primaryPathNoExt);
+        }
+
+        // Mark duplicate file for deletion
+        pathsToDelete.add(dupMeta.path);
         totalResolvedFiles++;
       }
+
+      // Save updated primary content
+      primaryEntry.content = updatedPrimaryContent;
+      primaryEntry.size = updatedPrimaryContent.length;
+      primaryEntry.lastModified = Date.now();
       mergedGroupCount++;
     }
 
     const currentProgress = Math.min(totalGroups, i + chunk.length);
-    const pct = Math.round((currentProgress / totalGroups) * 95);
+    const pct = Math.min(50, Math.round((currentProgress / totalGroups) * 50));
 
     onProgress?.({
-      phase: 'deleting',
+      phase: 'analyzing',
       current: currentProgress,
       total: totalGroups,
-      message: `Merged ${currentProgress} of ${totalGroups} duplicate groups (${totalResolvedFiles} files resolved)...`,
+      message: `Merging duplicate note metadata (${currentProgress}/${totalGroups} groups)...`,
       percentage: pct,
     });
 
     // Yield control to event loop
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  // Step 2: Delete duplicate files from map
+  onProgress?.({
+    phase: 'deleting',
+    current: pathsToDelete.size,
+    total: pathsToDelete.size,
+    message: `Removing ${pathsToDelete.size} merged duplicate files...`,
+    percentage: 55,
+  });
+
+  pathsToDelete.forEach((path) => {
+    fileMap.delete(path);
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 15));
+
+  // Step 3: Link redirection across vault in chunks if needed
+  if (options.redirectLinks && linkRedirectMap.size > 0) {
+    const remainingFiles = Array.from(fileMap.values());
+    const totalFiles = remainingFiles.length;
+    const fileBatchSize = 30;
+
+    for (let i = 0; i < totalFiles; i += fileBatchSize) {
+      const fileSlice = remainingFiles.slice(i, i + fileBatchSize);
+
+      for (const file of fileSlice) {
+        if (!file || file.isBinary || file.isConfigOrPlugin || !file.content) {
+          continue;
+        }
+
+        let newContent = file.content;
+        linkRedirectMap.forEach((newTarget, oldTarget) => {
+          if (oldTarget && newTarget && oldTarget !== newTarget) {
+            newContent = replaceLinkInContent(newContent, oldTarget, newTarget);
+          }
+        });
+
+        if (newContent !== file.content) {
+          file.content = newContent;
+          file.size = newContent.length;
+          file.lastModified = Date.now();
+        }
+      }
+
+      const processedCount = Math.min(totalFiles, i + fileBatchSize);
+      const linkPct = 55 + Math.round((processedCount / totalFiles) * 40);
+
+      onProgress?.({
+        phase: 'updating-links',
+        current: processedCount,
+        total: totalFiles,
+        message: `Redirecting wikilinks across vault (${processedCount}/${totalFiles} files checked)...`,
+        percentage: linkPct,
+      });
+
+      // Yield control
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
   }
 
   onProgress?.({
     phase: 'completed',
     current: totalGroups,
     total: totalGroups,
-    message: `Finished merging ${mergedGroupCount} duplicate groups!`,
+    message: `Successfully merged ${mergedGroupCount} duplicate groups (${totalResolvedFiles} files resolved)!`,
     percentage: 100,
   });
 
+  // Yield to allow UI to render the completion state
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
   return {
-    updatedRawFiles: currentRawFiles,
+    updatedRawFiles: Array.from(fileMap.values()),
     resolvedCount: totalResolvedFiles,
     mergedGroupCount,
   };
